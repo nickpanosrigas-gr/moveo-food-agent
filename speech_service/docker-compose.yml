@@ -1,0 +1,20 @@
+services:
+  speech_service:
+    build: .
+    image: speech-service:latest
+    container_name: speech-api
+    ports:
+      - "8000:8000"
+    volumes:
+      - speech_cache:/models
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+volumes:
+  speech_cache:

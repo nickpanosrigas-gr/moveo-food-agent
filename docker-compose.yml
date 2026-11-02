@@ -1,0 +1,30 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: moveo-food-agent-backend
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${BACKEND_EXTERNAL_PORT}:${BACKEND_INTERNAL_PORT}"
+    environment:
+      - PORT=${BACKEND_INTERNAL_PORT}
+      - OLLAMA_URL=${OLLAMA_URL}
+      - OLLAMA_MODEL=${OLLAMA_MODEL}
+      - OLLAMA_CTX=${OLLAMA_CTX}
+      - APPLICANT_EMAIL=${APPLICANT_EMAIL}
+      - MCP_SERVER_URL=${MCP_SERVER_URL}
+      - SPEECH_URL=${SPEECH_URL}
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    container_name: moveo-food-agent-web
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${WEB_EXTERNAL_PORT}:${WEB_INTERNAL_PORT}"
+    environment:
+      - WEB_INTERNAL_PORT=${WEB_INTERNAL_PORT}
+    depends_on:
+      - backend
