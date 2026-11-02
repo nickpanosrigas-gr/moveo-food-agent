@@ -6,7 +6,7 @@ services:
     container_name: moveo-food-agent-backend
     restart: unless-stopped
     ports:
-      - ${BACKEND_EXTERNAL_PORT}:${BACKEND_INTERNAL_PORT}"
+      - "${BACKEND_EXTERNAL_PORT}:${BACKEND_INTERNAL_PORT}"
     environment:
       - PORT=${BACKEND_INTERNAL_PORT}
       - OLLAMA_URL=${OLLAMA_URL}
@@ -23,7 +23,7 @@ services:
     container_name: moveo-food-agent-web
     restart: unless-stopped
     ports:
-      - ${WEB_EXTERNAL_PORT}:${WEB_INTERNAL_PORT}"
+      - "${WEB_EXTERNAL_PORT}:${WEB_INTERNAL_PORT}"
     environment:
       - WEB_INTERNAL_PORT=${WEB_INTERNAL_PORT}
     depends_on:
