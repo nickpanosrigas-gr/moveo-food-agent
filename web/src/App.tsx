@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { RotateCcw } from 'lucide-react';
 import { useAgentStream } from './hooks/useAgentStream';
 import { useVAD } from './hooks/useVAD';
