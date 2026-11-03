@@ -65,23 +65,25 @@ class SessionManager:
 
             agent = self.sessions[session_id]
 
-            # Deduplicate warmup in case React strict-mode calls this concurrently
+            # Start parallel warmup in the background as soon as the tab opens
             if not self.models_loaded and not self._warmup_in_progress:
                 self._warmup_in_progress = True
-                asyncio.create_task(self._run_warmup(agent))
+                self._warmup_task = asyncio.create_task(self._run_warmup(agent))
 
             return agent
 
     async def _run_warmup(self, agent: FoodOrderAgent) -> None:
         try:
+            t0 = time.monotonic()
             logger.info("[VRAM] Warming up Faster-Whisper, Kokoro, and llama-server in parallel...")
-            await asyncio.gather(
+            speech_res, llm_res = await asyncio.gather(
                 self.speech.warmup_models(keep_alive=INACTIVITY_TIMEOUT_SECONDS),
                 agent.warmup_async(),
                 return_exceptions=True,
             )
+            elapsed = time.monotonic() - t0
+            logger.info(f"[VRAM] Warmup finished in {elapsed:.2f}s | Speech: {speech_res} | LLM: {llm_res}")
             self.models_loaded = True
-            logger.info("[VRAM] All models and KV caches ready.")
         finally:
             self._warmup_in_progress = False
 
@@ -270,6 +272,8 @@ async def _stream_agent_turn(
 @app.post("/api/chat/text")
 async def chat_text_endpoint(req: TextChatRequest) -> StreamingResponse:
     agent = await session_manager.get_or_create_agent(req.session_id)
+    if getattr(session_manager, "_warmup_task", None) and not session_manager._warmup_task.done():
+        await session_manager._warmup_task
     await session_manager.touch_session(req.session_id)
     return StreamingResponse(
         _stream_agent_turn(agent=agent, user_text=req.message, force_failure=req.force_failure),
@@ -285,6 +289,8 @@ async def chat_voice_endpoint(
     force_failure: FailureModeType | None = Form(None),
 ) -> StreamingResponse:
     agent = await session_manager.get_or_create_agent(session_id)
+    if getattr(session_manager, "_warmup_task", None) and not session_manager._warmup_task.done():
+            await session_manager._warmup_task
     await session_manager.touch_session(session_id)
     audio_bytes = await file.read()
     filename = file.filename or f"recording_{uuid.uuid4().hex[:6]}.wav"
@@ -330,6 +336,10 @@ async def chat_voice_endpoint(
 @app.post("/api/session/start")
 async def start_session_endpoint(req: SessionLifecycleRequest) -> dict[str, Any]:
     agent = await session_manager.get_or_create_agent(req.session_id)
+    # Ensure all models are fully resident in VRAM before marking session as ready
+    if not session_manager.models_loaded:
+        await session_manager._run_warmup(agent)
+        
     return {
         "status": "ready",
         "session_id": req.session_id,

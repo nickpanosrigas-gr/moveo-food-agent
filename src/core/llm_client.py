@@ -46,6 +46,8 @@ class LLMClient:
             "stream": False,
             "temperature": temperature,
             "max_tokens": 512,
+            "id_slot": 0,
+            "cache_prompt": True,
             "chat_template_kwargs": {"enable_thinking": False},
         }
         if tools:
@@ -71,11 +73,14 @@ class LLMClient:
             "model": self.model,
             "messages": [
                 {"role": "system", "content": static_system_prompt},
-                {"role": "user", "content": "hello"},
+                {"role": "user", "content": "[LIVE CART CONTEXT]\nCURRENT CART STATE: Empty (0 items, Total: $0.00).\nAWAITING_FINAL_CONFIRMATION: False\n[/LIVE CART CONTEXT]\n\nUser: hi"},
             ],
             "tools": tools,
+            "tool_choice": "auto",
             "max_tokens": 1,
-            "temperature": 0.0,
+            "temperature": 0.1,
+            "id_slot": 0,
+            "cache_prompt": True,
             "chat_template_kwargs": {"enable_thinking": False},
         }
         logger.info(f"[llama-server] Warming up KV cache for static system prompt...")
@@ -100,11 +105,14 @@ class LLMClient:
             "model": self.model,
             "messages": [
                 {"role": "system", "content": static_system_prompt},
-                {"role": "user", "content": "hello"},
+                {"role": "user", "content": "[LIVE CART CONTEXT]\nCURRENT CART STATE: Empty (0 items, Total: $0.00).\nAWAITING_FINAL_CONFIRMATION: False\n[/LIVE CART CONTEXT]\n\nUser: hi"},
             ],
             "tools": tools,
+            "tool_choice": "auto",
             "max_tokens": 1,
-            "temperature": 0.0,
+            "temperature": 0.1,
+            "id_slot": 0,
+            "cache_prompt": True,
             "chat_template_kwargs": {"enable_thinking": False},
         }
         logger.info(f"[llama-server Async] Warming up KV cache...")
@@ -112,10 +120,12 @@ class LLMClient:
             resp = await client.post("/v1/chat/completions", json=payload)
             resp.raise_for_status()
             data = resp.json()
+            prompt_tokens = data.get("usage", {}).get("prompt_tokens", 0)
+            logger.info(f"[llama-server Async] KV cache ready ({prompt_tokens} prompt tokens cached).")
             return {
                 "status": "loaded_and_kv_cached",
                 "model": self.model,
-                "cached_tokens": data.get("usage", {}).get("prompt_tokens", 0),
+                "cached_tokens": prompt_tokens,
             }
 
     def unload_model_sync(self) -> dict[str, Any]:
