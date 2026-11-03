@@ -12,10 +12,10 @@ load_dotenv(ROOT_DIR / ".env")
 
 @dataclass(frozen=True)
 class Settings:
-    # Ollama LLM Configuration
-    OLLAMA_URL: str = os.getenv("OLLAMA_URL", "http://192.168.1.220:11434").strip().rstrip("/")
-    OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "gemma4:12b").strip()
-    OLLAMA_CTX: int = int(os.getenv("OLLAMA_CTX", "32000"))
+    # LLM Backend (llama-server)
+    LLM_URL: str = os.getenv("LLM_URL", "http://192.168.1.220:8080").strip().rstrip("/")
+    LLM_MODEL: str = os.getenv("LLM_MODEL", "Qwen3.6-35B-A3B").strip()
+    LLM_CTX: int = int(os.getenv("LLM_CTX", "32768"))
 
     # Moveo MCP & Speech Service Configuration
     APPLICANT_EMAIL: str = os.getenv("APPLICANT_EMAIL", "").strip()

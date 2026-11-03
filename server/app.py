@@ -74,7 +74,7 @@ class SessionManager:
 
     async def _run_warmup(self, agent: FoodOrderAgent) -> None:
         try:
-            logger.info("[VRAM] Warming up Faster-Whisper, Kokoro, and Ollama in parallel...")
+            logger.info("[VRAM] Warming up Faster-Whisper, Kokoro, and llama-server in parallel...")
             await asyncio.gather(
                 self.speech.warmup_models(keep_alive=INACTIVITY_TIMEOUT_SECONDS),
                 agent.warmup_async(),

@@ -68,9 +68,9 @@ def format_user_turn_with_context(
     )
 
 
-def build_ollama_tools(menu: MenuCatalog) -> list[dict[str, Any]]:
+def build_llm_tools(menu: MenuCatalog) -> list[dict[str, Any]]:
     """
-    Dynamically constructs standard OpenAI/Ollama JSON-Schema tool definitions
+    Dynamically constructs standard OpenAI JSON-Schema tool definitions
     directly from `MenuCatalog`, enforcing strict `enum` constraints for every
     `item_id`, item option, and extra.
     """
