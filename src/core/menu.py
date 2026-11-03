@@ -100,10 +100,10 @@ class ValidatedOrderItem(BaseModel):
 
 class MenuCatalog:
     """
-    Loads `menu.yaml` and provides:
+    Loads menu.yaml and provides:
       1. Deterministic option resolution (fills defaults, catches missing required options like Milkshake flavor).
       2. Exact unit and line price calculation (using Decimal to prevent floating-point drift).
-      3. Dynamic Pydantic & Gemini tool schema generation so only valid item_ids and item-specific
+      3. Dynamic Pydantic & LLM tool schema generation so only valid item_ids and item-specific
          options/extras are allowed.
     """
 
@@ -257,13 +257,7 @@ class MenuCatalog:
     # -----------------------------------------------------------------
     def build_per_item_models(self) -> dict[str, type[BaseModel]]:
         """
-        Dynamically builds a strict Pydantic model for each item in `menu.yaml`.
-        For example:
-          - `classic_burger` gets `size: Literal['regular', 'large'] = 'regular'`,
-            `patty: Literal['beef', 'chicken', 'veggie'] = 'beef'`,
-            `extras: list[Literal['cheese', 'bacon', 'avocado', 'extra_patty']] = []`
-          - `milkshake` gets `size: Literal['regular', 'large'] = 'regular'`,
-            `flavor: Literal['vanilla', 'chocolate', 'strawberry', 'oreo'] | None = None`
+        Dynamically builds a strict Pydantic model for each item in menu.yaml.
         """
         per_item_models: dict[str, type[BaseModel]] = {}
 
@@ -427,10 +421,10 @@ class MenuCatalog:
         return "".join(hints)
 
     def format_for_prompt(self) -> str:
-        """Renders a compact, unambiguous reference sheet of the menu for the Gemini system prompt."""
-        lines: list[str] = ["MENU CATALOG (All prices in EUR):"]
+        """Renders a compact, unambiguous reference sheet of the menu for the LLM system prompt."""
+        lines: list[str] = ["MENU CATALOG (All prices in USD):"]
         for item in self.items:
-            lines.append(f"- {item.name} (item_id: '{item.id}', base_price: €{item.base_price:.2f})")
+            lines.append(f"- {item.name} (item_id: '{item.id}', base_price: ${item.base_price:.2f})")
             for opt_name, opt_def in item.options.items():
                 mods = ", ".join(
                     f"{c} ({opt_def.get_modifier(c):+.2f})" if opt_def.get_modifier(c) != 0 else c
@@ -443,7 +437,7 @@ class MenuCatalog:
                 )
                 lines.append(f"    • option '{opt_name}' [{req_tag}]: [{mods}]")
             if item.extras and item.extras.choices:
-                exts = ", ".join(f"{e.id} (+€{e.price:.2f})" for e in item.extras.choices)
+                exts = ", ".join(f"{e.id} (+${e.price:.2f})" for e in item.extras.choices)
                 lines.append(f"    • extras: [{exts}]")
             else:
                 lines.append("    • extras: none")

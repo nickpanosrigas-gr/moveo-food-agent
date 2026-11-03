@@ -34,36 +34,30 @@ class MCPOrderClient:
         applicant_email: str | None = None,
         timeout_seconds: float = 30.0,
     ):
-        self.server_url = (server_url or settings.MCP_SERVER_URL).strip()
-        self.applicant_email = (applicant_email or settings.APPLICANT_EMAIL).strip()
-
-        if not self.applicant_email or self.applicant_email == "your_email_from_cv@example.com":
-            logger.warning(
-                "[MCPOrderClient] APPLICANT_EMAIL in .env is missing or still set to the placeholder! "
-                "Update APPLICANT_EMAIL in .env before submitting an order."
-            )
-        self.timeout_seconds = timeout_seconds
-        
+        # Resolve server URL with priority: explicit arg -> .env/settings -> default URL
         self.server_url = (
             server_url
+            or getattr(settings, "MCP_SERVER_URL", None)
             or os.getenv("MCP_SERVER_URL")
             or DEFAULT_MCP_URL
         ).strip()
 
+        # Resolve applicant email: explicit arg -> .env/settings -> environment
         self.applicant_email = (
             applicant_email
+            or getattr(settings, "APPLICANT_EMAIL", None)
             or os.getenv("APPLICANT_EMAIL")
             or os.getenv("X_APPLICANT_EMAIL")
             or ""
         ).strip()
 
-        if not self.applicant_email:
-            logger.warning(
-                "[MCPOrderClient] APPLICANT_EMAIL is not set! "
-                "The Moveo MCP server requires the 'X-Applicant-Email' header on all requests."
-            )
-
         self.timeout_seconds = timeout_seconds
+
+        if not self.applicant_email or self.applicant_email == "your_email_from_cv@example.com":
+            logger.warning(
+                "[MCPOrderClient] APPLICANT_EMAIL is missing or set to the default placeholder! "
+                "The Moveo MCP server requires 'X-Applicant-Email' header on all requests."
+            )
 
     def _build_headers(self, force_failure: str | None = None) -> dict[str, str]:
         """Constructs HTTP headers for the MCP Streamable HTTP transport."""

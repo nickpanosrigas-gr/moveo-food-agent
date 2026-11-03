@@ -77,7 +77,7 @@ class LLMClient:
             "model": self.model,
             "messages": [
                 {"role": "system", "content": static_system_prompt},
-                {"role": "user", "content": "[LIVE CART CONTEXT]\nCURRENT CART STATE: Empty (0 items, Total: €0.00).\nAWAITING_FINAL_CONFIRMATION: False\n[/LIVE CART CONTEXT]\n\nUser: hi"},
+                {"role": "user", "content": "[LIVE CART CONTEXT]\nCURRENT CART STATE: Empty (0 items, Total: $0.00).\nAWAITING_FINAL_CONFIRMATION: False\n[/LIVE CART CONTEXT]\n\nUser: hi"},
             ],
             "tools": tools,
             "tool_choice": "auto",
@@ -109,7 +109,7 @@ class LLMClient:
             "model": self.model,
             "messages": [
                 {"role": "system", "content": static_system_prompt},
-                {"role": "user", "content": "[LIVE CART CONTEXT]\nCURRENT CART STATE: Empty (0 items, Total: €0.00).\nAWAITING_FINAL_CONFIRMATION: False\n[/LIVE CART CONTEXT]\n\nUser: hi"},
+                {"role": "user", "content": "[LIVE CART CONTEXT]\nCURRENT CART STATE: Empty (0 items, Total: $0.00).\nAWAITING_FINAL_CONFIRMATION: False\n[/LIVE CART CONTEXT]\n\nUser: hi"},
             ],
             "tools": tools,
             "tool_choice": "auto",

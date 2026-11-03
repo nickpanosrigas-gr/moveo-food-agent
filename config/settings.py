@@ -13,9 +13,9 @@ load_dotenv(ROOT_DIR / ".env")
 @dataclass(frozen=True)
 class Settings:
     # LLM Backend (llama-server)
-    LLM_URL: str = os.getenv("LLM_URL", "http://192.168.1.220:8080").strip().rstrip("/")
+    LLM_URL: str = os.getenv("LLM_URL").strip().rstrip("/")
     LLM_MODEL: str = os.getenv("LLM_MODEL", "Qwen3.6-35B-A3B").strip()
-    LLM_CTX: int = int(os.getenv("LLM_CTX", "32768"))
+    LLM_CTX: int = int(os.getenv("LLM_CTX", "16384"))
 
     # Moveo MCP & Speech Service Configuration
     APPLICANT_EMAIL: str = os.getenv("APPLICANT_EMAIL", "").strip()
@@ -23,7 +23,7 @@ class Settings:
         "MCP_SERVER_URL",
         "https://webviews-git-moveo-food-nlp-assignment-moveo-ai.vercel.app/api/demo/mcp",
     ).strip()
-    SPEECH_URL: str = os.getenv("SPEECH_URL", "http://localhost:8000").strip().rstrip("/")
+    SPEECH_URL: str = os.getenv("SPEECH_URL").strip().rstrip("/")
 
     # Paths
     MENU_PATH: Path = ROOT_DIR / "menu.yaml"

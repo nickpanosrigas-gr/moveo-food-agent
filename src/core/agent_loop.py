@@ -188,7 +188,7 @@ class FoodOrderAgent:
                     logger.info(
                         f"[TOOL RESULT] {fn_name} -> success={is_success} | "
                         f"Action: {tool_result.get('action', 'none')} | "
-                        f"Cart Total: €{self.cart.total_price:.2f}"
+                        f"Cart Total: ${self.cart.total_price:.2f}"
                     )
 
                     if not is_success:
@@ -272,14 +272,14 @@ class FoodOrderAgent:
 
                     if self.cart.modified_in_current_turn or not was_ready_to_submit:
                         logger.info(
-                            f"[MCP GUARD] Blocked premature submission. Prompting confirmation for €{self.cart.total_price:.2f}"
+                            f"[MCP GUARD] Blocked premature submission. Prompting confirmation for ${self.cart.total_price:.2f}"
                         )
                         self.awaiting_confirmation = True
                         guard_res = {
                             "status": "CONFIRMATION_REQUIRED_FIRST",
                             "instruction": (
                                 f"Do NOT submit the order yet. Summarize the current order items and exact "
-                                f"total price (€{self.cart.total_price:.2f}) and ask the user: 'Ready to submit?'"
+                                f"total price (${self.cart.total_price:.2f}) and ask the user: 'Ready to submit?'"
                             ),
                             "cart": self.cart.get_state_snapshot(),
                         }
@@ -511,7 +511,7 @@ class FoodOrderAgent:
             return f"Sorry, the order couldn't be submitted — {err} Would you like me to try again?"
 
         if self.cart.lines:
-            return f"Your current total is €{self.cart.total_price:.2f}. Anything else?"
+            return f"Your current total is ${self.cart.total_price:.2f}. Anything else?"
             
         return "I didn't quite catch that. Could you repeat what you'd like to order?"
     

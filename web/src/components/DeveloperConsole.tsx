@@ -24,7 +24,7 @@ const FAILURE_MODES: Array<{ value: FailureMode; label: string; short: string }>
   { value: 'kitchen_busy', label: 'kitchen_busy (MCP 503 Transient)', short: 'kitchen_busy' },
   { value: 'server_error', label: 'server_error (MCP 500 Failure)', short: 'server_error' },
   { value: 'schema_error', label: 'schema_error (JSON-RPC -32602)', short: 'schema_error' },
-  { value: 'business_refusal', label: 'business_refusal (> €50.00 Limit)', short: 'business_refusal' },
+  { value: 'business_refusal', label: 'business_refusal (> $50.00 Limit)', short: 'business_refusal' },
 ];
 
 export const DeveloperConsole: React.FC<DeveloperConsoleProps> = ({
@@ -267,7 +267,7 @@ export const DeveloperConsole: React.FC<DeveloperConsoleProps> = ({
 
                     <details className="pt-1">
                       <summary className="text-[11px] font-bold text-white hover:text-zinc-300 cursor-pointer">
-                        Cart Snapshot (Total: €{log.cart_state?.total_price?.toFixed(2) || '0.00'})
+                        Cart Snapshot (Total: ${log.cart_state?.total_price?.toFixed(2) || '0.00'})
                       </summary>
                       <pre className="mt-1.5 font-sans text-[11px] text-zinc-200 bg-zinc-950/60 p-2.5 rounded-md overflow-x-auto border border-white/10">
                         {JSON.stringify(log.cart_state, null, 2)}
