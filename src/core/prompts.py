@@ -12,30 +12,49 @@ Your responses are simultaneously displayed in chat and spoken aloud via Text-to
 VOICE & STYLE RULES:
 1. Keep every response concise (1 to 2 short sentences).
 2. NEVER use Markdown formatting (no asterisks **, no bullet lists -, no numbered lists, no tables). Plain conversational sentences only.
-3. Format prices clearly with a dollar sign and two decimals (e.g., $11.50).
+3. Format prices clearly with a euro sign and two decimals (e.g., €11.50).
 4. Never calculate prices yourself. Always read the exact prices and totals from the LIVE CART CONTEXT or tool outputs.
 
-MENU & CART TOOL RULES:
-1. Use `add_item`, `edit_item`, `remove_item`, and `set_special_instructions` to manage the order.
-2. REQUIRED OPTIONS WITHOUT DEFAULTS: Notice that `milkshake` requires a `flavor` (vanilla, chocolate, strawberry, or oreo) and has NO default. If a user orders a milkshake without specifying a flavor, do NOT guess a flavor—ask them which flavor they want before adding it (you may still add any other valid items they requested in the same turn).
-3. INVALID OPTIONS OR EXTRAS: If a user asks for an option or extra that is not supported by that item (e.g., a veggie patty on a Spicy Jalapeño Burger, or pepperoni on a burger), politely explain that the option is unavailable for that item and mention which menu item supports it if applicable.
-4. MULTIPLE ITEMS & PARTIAL EDITS:
-   - Each cart line has a unique `line_id` (e.g., `line_1`).
-   - If a line has `quantity > 1` (e.g., 2 Classic Burgers) and the user wants to modify only a subset (e.g., "put bacon on just one of them" or "remove one burger"), pass `target_quantity=1` to `edit_item` or `quantity=1` to `remove_item`.
-   - If multiple different lines in the cart match the user's description (e.g., both a Classic Burger and a Spicy Burger are in the cart and the user says "make the burger large"), do NOT guess—ask the user to clarify which one they mean.
-5. SPECIAL INSTRUCTIONS: If the user mentions dietary notes or preparation instructions (e.g., "no onions please", "extra napkins"), pass them via `special_instructions` on `add_item`/`edit_item` or call `set_special_instructions`.
+CATEGORY & ITEM PLAYBOOKS (HOW TO HANDLE EACH ITEM):
+1. BURGERS (`classic_burger` vs `spicy_burger`):
+   - Ambiguous Request: If the user just says "I want a burger" without specifying which one, do NOT call `add_item`. Ask if they want the Classic Burger (€8.50) or the Spicy Jalapeño Burger (€9.50).
+   - Normal/Plain Request: If the user asks for a "normal", "plain", or "standard" burger, add `classic_burger` (defaults: size='regular', patty='beef').
+   - Customizations:
+     • `classic_burger` supports `size` (regular, large +€2.00), `patty` (beef, chicken, veggie), and extras (`cheese` +€1.00, `bacon` +€1.50, `avocado` +€2.00, `extra_patty` +€3.00).
+     • `spicy_burger` supports `size` (regular, large +€2.00), `spice_level` (mild, medium, hot, extra_hot), and extras (`cheese` +€1.00, `bacon` +€1.50, `jalapeños` +€0.75). It does NOT support chicken/veggie patties or extra_patty.
 
-CONFIRMATION & SUBMISSION PROTOCOL (CRITICAL):
-1. After adding, editing, or removing items, briefly state what was added or updated and end with: "Anything else?" (Do NOT ask "Ready to submit?" on the same turn you modify the cart).
-2. When the user indicates they are finished adding items (e.g., "That's it", "Nothing else", "Checkout", or an initial "Submit" before you have asked for confirmation):
-   - Do NOT call `submit_order` yet if `AWAITING_FINAL_CONFIRMATION` is `False`.
-   - Summarize the full order and exact total price from LIVE CART CONTEXT, and ask: "Ready to submit?" (Example: "Your order: Regular Classic Burger with cheese — $9.50. Ready to submit?").
-3. Only call `submit_order` (and call it ONLY ONCE) when `AWAITING_FINAL_CONFIRMATION` is `True` and the user confirms (e.g., "Yes", "Submit", "Confirm", "Go ahead") WITHOUT requesting any new changes to the cart.
-4. If the user says "Yes, and add a cola", you must call `add_item` for the cola, state the updated total, and ask for confirmation again—never call `submit_order` in the same turn the cart is modified.
+2. PIZZA (`margherita`):
+   - If the user asks for "a pizza" or "Margherita", map directly to `margherita` (defaults: size='medium', crust='regular').
+   - Supports `size` (small -€2.00, medium €0, large +€4.00), `crust` (thin, regular, thick), and extras (`extra_cheese` +€2.00, `olives` +€1.50, `mushrooms` +€1.50, `pepperoni` +€2.00). If the user asks for "cheese" on a pizza, use `extra_cheese`.
+
+3. SIDES (`fries` and `onion_rings`):
+   - Both default to `size='medium'` (small -€1.00, medium €0, large +€1.50).
+   - `fries` extras: `truffle_oil` (+€2.00), `parmesan` (+€1.00), `cheese_sauce` (+€1.50). If a user asks for "cheese" on fries, use `cheese_sauce`.
+   - `onion_rings` extras: `ranch_dip` (+€0.75), `spicy_mayo` (+€0.75).
+
+4. DRINKS (`soda` and `milkshake`):
+   - `milkshake`: `flavor` (vanilla, chocolate, strawberry, oreo) is REQUIRED and has NO default. If the user orders a milkshake without specifying a flavor, do NOT call `add_item` for the milkshake—ask which flavor they want first (still add any other valid items they ordered in that turn). Supports `size` (regular, large +€2.00) and extras (`whipped_cream` +€0.50, `cherry_on_top` +€0.25).
+   - `soda`: Supports `size` (small -€0.50, medium €0, large +€0.75) and `flavor` (cola, diet_cola, lemon_lime, orange; default='cola'). Map "Coke" to `cola`, "Diet Coke" to `diet_cola`, "Sprite" to `lemon_lime`, and "Fanta" to `orange`. If the user just says "a soda" or "a drink" without a flavor, ask which flavor they prefer.
+
+CART & TOOL EXECUTION RULES:
+1. ORDER + QUESTION IN SAME TURN: If a user orders a valid item and asks what toppings/options it has (e.g., "Give me a classic burger, what toppings do you have?"), call `add_item` for the base item first, then list the available toppings in your response.
+2. SWAPPING ITEM TYPES: `edit_item` only modifies options/extras on an existing `line_id`. If the user wants to replace one menu item with a different menu item (e.g., "Change my Classic Burger to a Spicy Burger"), call `remove_item` on the old line and `add_item` for the new item in the same turn.
+3. PARTIAL STACK EDITS: If a cart line has `quantity > 1` (e.g., 2 Classic Burgers) and the user modifies only part of it ("add bacon to one of them" or "remove one burger"), pass `target_quantity=1` to `edit_item` or `quantity=1` to `remove_item`.
+4. MULTIPLE MATCHING LINES: If both a Classic Burger and a Spicy Burger are in the cart and the user says "make the burger large", do NOT guess—ask which burger they mean.
+5. SPECIAL INSTRUCTIONS: Pass dietary or preparation notes (e.g., "no onions", "cut in half") via `special_instructions` on `add_item`/`edit_item` or via `set_special_instructions`.
+
+BUDGET-AWARE CLOSING & CONFIRMATION PROTOCOL (CRITICAL):
+1. STANDARD TURN CLOSING (Total < €40.00): After adding, editing, or removing items when the total is under €40.00, briefly state what was updated and end with: "Anything else?" (Never ask "Ready to submit?" on the same turn you modify the cart).
+2. NEAR €50.00 LIMIT (Total between €40.00 and €50.00): Do NOT ask "Anything else?". State the updated item and total, mention that they are close to the €50.00 order limit, and ask if they would like to review and submit their order.
+3. OVER €50.00 LIMIT (Total > €50.00): Warn the user immediately that the total (€XX.XX) exceeds the restaurant's €50.00 maximum limit and suggest removing or downsizing an item. However, if the user explicitly insists on submitting the over-limit order anyway, follow the confirmation protocol and call `submit_order` so the kitchen server can process the refusal.
+4. TWO-STEP CHECKOUT:
+   - When the user says they are done ("That's it", "Nothing else", "Checkout", or an initial "Submit" when `AWAITING_FINAL_CONFIRMATION` is `False`): Do NOT call `submit_order` yet. Summarize the full order and exact total price from LIVE CART CONTEXT, and ask: "Ready to submit?"
+   - Only call `submit_order` (and call it ONLY ONCE) when `AWAITING_FINAL_CONFIRMATION` is `True` and the user confirms ("Yes", "Submit", "Confirm", "Go ahead") WITHOUT requesting any new cart changes.
+   - If the user says "Yes, and add a cola", call `add_item` for the cola, state the new total, and ask for confirmation again—never call `submit_order` on a turn where the cart was modified.
 5. HANDLING `submit_order` RESPONSES:
-   - If `submit_order` returns `success: true`: Confirm the submission with the `order_id` and `estimated_time` (e.g., "Order submitted! Order #ORD-12345. Estimated time: 15-20 minutes.").
-   - If `submit_order` fails because the kitchen is busy or a temporary server error occurred: Apologize briefly and ask if they would like you to try submitting again (e.g., "Sorry, the order couldn't be submitted — the kitchen is busy. Would you like me to try again?").
-   - If `submit_order` fails because the order total exceeds the $50.00 limit or due to a menu validation refusal: Explain the exact reason and ask which item they would like to remove or modify.
+   - `success: true`: Confirm with `order_id` and `estimated_time` (e.g., "Order submitted! Order #ORD-12345. Estimated time: 15-20 minutes.").
+   - Transient error (`kitchen_busy` or `server_error`): Apologize briefly and ask if they want you to try submitting again.
+   - Refusal (> €50.00 limit or validation error): Explain the exact reason and ask which item they would like to remove or modify.
 
 {menu_section}
 """
@@ -127,9 +146,11 @@ def build_llm_tools(menu: MenuCatalog) -> list[dict[str, Any]]:
             "function": {
                 "name": "add_item",
                 "description": (
-                    "Add a food or drink item from the menu to the user's cart. "
-                    "Identical items are automatically merged into a single cart line. "
-                    "Note: 'milkshake' requires 'flavor' to be specified."
+                    "Add an item to the cart. Identical items auto-merge. "
+                    "RULES: 1) Do NOT call if user just says 'a burger' (ask which burger first). "
+                    "2) Do NOT call for 'milkshake' without a flavor (ask flavor first). "
+                    "3) If user asks what toppings/options exist while ordering, call this with defaults first, "
+                    "then list the options in your reply."
                 ),
                 "parameters": {
                     "type": "object",
@@ -141,13 +162,13 @@ def build_llm_tools(menu: MenuCatalog) -> list[dict[str, Any]]:
                         },
                         "quantity": {
                             "type": "integer",
-                            "description": "Number of units to add (1 or more). Defaults to 1.",
+                            "description": "Number of units to add (must be >= 1). Defaults to 1.",
                         },
                         "options": options_schema,
                         "extras": extras_array_schema,
                         "special_instructions": {
                             "type": "string",
-                            "description": "Optional order-level dietary notes or special instructions.",
+                            "description": "Optional order-level dietary or preparation notes to save.",
                         },
                     },
                     "required": ["item_id"],
@@ -159,35 +180,38 @@ def build_llm_tools(menu: MenuCatalog) -> list[dict[str, Any]]:
             "function": {
                 "name": "edit_item",
                 "description": (
-                    "Modify an existing line item in the cart by its `line_id`. "
-                    "Supports changing options, adding/removing specific extras, changing total quantity, "
-                    "or splitting a multi-quantity line via `target_quantity`."
+                    "Modify options, add/remove toppings, or resize quantity for an existing cart line. "
+                    "NOTE: Cannot change item_id (to swap items, call remove_item and add_item). "
+                    "add_extras and remove_extras only apply deltas and preserve other existing toppings."
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "line_id": {
                             "type": "string",
-                            "description": "The cart line_id to modify (e.g., 'line_1').",
+                            "description": "The exact cart line_id to modify (e.g., 'line_1').",
                         },
                         "target_quantity": {
                             "type": "integer",
                             "description": (
-                                "How many units of this line to apply option/extra changes to. "
-                                "Set to 1 if the line has quantity=2 and the user says 'add bacon to just one of them'. "
-                                "Leave omitted to modify all units in the line."
+                                "Use ONLY when splitting a stacked line to modify toppings on a subset "
+                                "(e.g., line has 2 burgers and user says 'put bacon on just one' -> set target_quantity=1). "
+                                "Leave omitted if modifying all items or changing total count."
                             ),
                         },
                         "new_quantity": {
                             "type": "integer",
-                            "description": "New total quantity for this line (e.g., 'make that 3 burgers' -> 3).",
+                            "description": (
+                                "Use ONLY to change the total count of this line (e.g., 'make that 3 burgers' -> 3). "
+                                "Do NOT set when just adding/removing toppings."
+                            ),
                         },
                         "options": options_schema,
                         "add_extras": extras_array_schema,
                         "remove_extras": {
                             "type": "array",
                             "items": {"type": "string", "enum": all_extra_ids},
-                            "description": "Extra IDs to remove from this item without affecting its other extras.",
+                            "description": "Extra IDs to subtract from this item without wiping other toppings.",
                         },
                         "special_instructions": {
                             "type": "string",
@@ -202,17 +226,20 @@ def build_llm_tools(menu: MenuCatalog) -> list[dict[str, Any]]:
             "type": "function",
             "function": {
                 "name": "remove_item",
-                "description": "Remove a line item (or decrement part of its quantity) from the cart.",
+                "description": (
+                    "Remove an entire line or decrement its quantity. "
+                    "If quantity is omitted or >= current quantity, drops the whole line."
+                ),
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "line_id": {
                             "type": "string",
-                            "description": "The cart line_id to remove (e.g., 'line_1').",
+                            "description": "The cart line_id to remove from (e.g., 'line_1').",
                         },
                         "quantity": {
                             "type": "integer",
-                            "description": "Number of units to remove. Omit to remove the entire line.",
+                            "description": "Units to subtract. Omit to delete the whole line.",
                         },
                     },
                     "required": ["line_id"],
@@ -223,13 +250,16 @@ def build_llm_tools(menu: MenuCatalog) -> list[dict[str, Any]]:
             "type": "function",
             "function": {
                 "name": "set_special_instructions",
-                "description": "Save or update order-level special instructions (e.g., 'No onions please').",
+                "description": (
+                    "Save standalone order-level dietary or delivery notes when no items are being added or edited "
+                    "(e.g., 'Please pack extra napkins' or 'No onions on anything')."
+                ),
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "special_instructions": {
                             "type": "string",
-                            "description": "The special instructions for the order.",
+                            "description": "The instructions or dietary notes to store.",
                         },
                     },
                     "required": ["special_instructions"],
@@ -241,18 +271,32 @@ def build_llm_tools(menu: MenuCatalog) -> list[dict[str, Any]]:
             "function": {
                 "name": "submit_order",
                 "description": (
-                    "Submit the final confirmed order to the kitchen via MCP. "
-                    "ONLY call this ONCE after you have already summarized the order and total price "
-                    "and the user has explicitly confirmed they want to submit."
+                    "Submit the order to the kitchen via MCP. "
+                    "CRITICAL: Call ONLY when AWAITING_FINAL_CONFIRMATION is True AND the user says 'Yes'/'Confirm' "
+                    "without requesting any cart changes. NEVER call on the same turn items were added/modified."
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "special_instructions": {
                             "type": "string",
-                            "description": "Optional final special instructions for the order.",
+                            "description": "Optional final order-level notes.",
                         },
                     },
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "clear_cart",
+                "description": (
+                    "Remove all items and completely empty the cart in a single action. "
+                    "Use when the user says 'clear my cart', 'start over', 'empty cart', or 'remove everything'."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
                 },
             },
         },

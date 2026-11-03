@@ -52,7 +52,7 @@ class CartLineItem(BaseModel):
         self.line_total = float(total)
 
     def format_description(self) -> str:
-        """Human-readable summary of the line item (e.g., '2x Large Classic Burger (beef) with cheese, bacon — $23.00')."""
+        """Human-readable summary of the line item (e.g., '2x Large Classic Burger (beef) with cheese, bacon — €23.00')."""
         opt_parts = [v for k, v in self.options.items() if k != "size"]
         size_prefix = f"{self.options['size'].title()} " if "size" in self.options else ""
         opt_suffix = f" ({', '.join(opt_parts)})" if opt_parts else ""
@@ -61,7 +61,7 @@ class CartLineItem(BaseModel):
         return (
             f"[{self.line_id}] {qty_prefix}{size_prefix}{self.name}"
             f"{opt_suffix}{extra_suffix} "
-            f"(${self.unit_price:.2f} ea, line total: ${self.line_total:.2f})"
+            f"(€{self.unit_price:.2f} ea, line total: €{self.line_total:.2f})"
         )
 
 
@@ -197,7 +197,7 @@ class OrderCart:
         return None
 
     # -----------------------------------------------------------------
-    # Totals & $50 Limit Inspection
+    # Totals & €50 Limit Inspection
     # -----------------------------------------------------------------
     @property
     def total_price(self) -> float:
@@ -484,6 +484,21 @@ class OrderCart:
             "removed_line": target_line.model_dump(),
             "cart": self.get_state_snapshot(),
         }
+    
+    # -----------------------------------------------------------------
+    # Core Function 4: clear_cart (Remove All Items From Cart)
+    # -----------------------------------------------------------------
+     
+    def clear_cart(self) -> dict[str, Any]:
+        """Tool implementation: empties all items from the cart."""
+        self.clear()
+        self.modified_in_current_turn = True
+        return {
+            "success": True,
+            "action": "cleared_cart",
+            "message": "Cart has been cleared.",
+            "cart": self.get_state_snapshot(),
+        }
 
     # -----------------------------------------------------------------
     # Auto-Merge Consolidation Helpers
@@ -532,7 +547,7 @@ class OrderCart:
     # Tool Dispatcher, MCP Serialization & System Prompt Formatting
     # -----------------------------------------------------------------
     def execute_tool(self, tool_name: str, tool_args: dict[str, Any]) -> dict[str, Any]:
-        """Unified dispatcher called by the Gemini agentic loop for local cart tools."""
+        """Unified dispatcher called by the agentic loop for local cart tools."""
         if tool_name == "add_item":
             return self.add_item(
                 item_id=tool_args.get("item_id", ""),
@@ -556,6 +571,8 @@ class OrderCart:
                 line_id=tool_args.get("line_id", ""),
                 quantity=tool_args.get("quantity"),
             )
+        elif tool_name == "clear_cart":
+            return self.clear_cart()
         else:
             return {"success": False, "error": f"Unknown cart tool '{tool_name}'."}
 
@@ -604,9 +621,9 @@ class OrderCart:
             )
 
         if not self.lines:
-            return "CURRENT CART STATE: Empty (0 items, Total: $0.00)."
+            return "CURRENT CART STATE: Empty (0 items, Total: €0.00)."
 
-        header = [f"CURRENT CART STATE ({self.total_item_count} item(s), Total: ${self.total_price:.2f}):"]
+        header = [f"CURRENT CART STATE ({self.total_item_count} item(s), Total: €{self.total_price:.2f}):"]
         for line in self.lines:
             header.append(f"  - {line.format_description()}")
 
@@ -615,7 +632,14 @@ class OrderCart:
 
         if self.exceeds_limit:
             header.append(
-                f"  - WARNING: Cart total (${self.total_price:.2f}) exceeds the $50.00 restaurant limit!"
+                f"  - WARNING: Cart total (€{self.total_price:.2f}) exceeds the €50.00 restaurant limit! "
+                "Inform the user they are over the €50.00 cap."
+            )
+        elif Decimal(str(self.total_price)) >= Decimal("40.00"):
+            remaining = Decimal("50.00") - Decimal(str(self.total_price))
+            header.append(
+                f"  - BUDGET NOTICE: Cart total (€{self.total_price:.2f}) is nearing the €50.00 limit "
+                f"(only €{remaining:.2f} remaining). Do NOT ask 'Anything else?'—ask if they are ready to checkout."
             )
 
         if self.modified_in_current_turn:

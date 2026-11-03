@@ -26,6 +26,19 @@ CHECKOUT_INTENT_REGEX = re.compile(
     re.IGNORECASE,
 )
 
+THINKING_STRIP_REGEX = re.compile(
+    r"<think>[\s\S]*?</think>|(?:\A|^)\s*</think>|<\/?think>",
+    re.IGNORECASE,
+)
+
+def _sanitize_agent_text(text: str) -> str:
+    """Removes any <think>...</think> blocks, stray </think> tags, and extra whitespace."""
+    if not text:
+        return ""
+    cleaned = THINKING_STRIP_REGEX.sub("", text)
+    # Collapse multiple blank lines or spaces left behind
+    cleaned = re.sub(r"\n\s*\n+", "\n", cleaned).strip()
+    return cleaned
 
 class FoodOrderAgent:
     def __init__(
@@ -103,6 +116,9 @@ class FoodOrderAgent:
         final_agent_text: str = ""
         submitted_in_this_turn: bool = False
 
+        # Track the last failed tool call signature: (fn_name, canonical_json_args)
+        last_failed_call: tuple[str, str] | None = None
+
         for step in range(self.max_steps):
             assistant_msg = self.llm.chat(
                 messages=self.history,
@@ -113,7 +129,6 @@ class FoodOrderAgent:
             tool_calls = assistant_msg.get("tool_calls") or []
             content = (assistant_msg.get("content") or "").strip()
 
-            # Prevent appending corrupt empty assistant turns to history
             if not tool_calls and not content:
                 logger.warning(f"[AGENT] Received completely empty response on step {step}. Breaking loop.")
                 break
@@ -130,16 +145,56 @@ class FoodOrderAgent:
                 fn_name = fn_block.get("name", "")
                 fn_args = fn_block.get("arguments") or {}
 
-                logger.info(f"[TOOL CALL] {fn_name} ({call_id}) | Args: {json.dumps(fn_args, ensure_ascii=False)}")
+                args_canonical = json.dumps(fn_args, sort_keys=True, ensure_ascii=False)
+                call_signature = (fn_name, args_canonical)
 
-                # 1. Local Cart Tools
-                if fn_name in ("add_item", "edit_item", "remove_item"):
-                    tool_result = self.cart.execute_tool(fn_name, fn_args)
-                    logger.info(
-                        f"[TOOL RESULT] {fn_name} -> success={tool_result.get('success')} | "
-                        f"Action: {tool_result.get('action', 'none')} | "
-                        f"Cart Total: ${self.cart.total_price:.2f}"
+                logger.info(f"[TOOL CALL] {fn_name} ({call_id}) | Args: {args_canonical}")
+
+                # -------------------------------------------------------------
+                # INTERCEPT DUPLICATE FAILED TOOL CALLS
+                # -------------------------------------------------------------
+                if last_failed_call is not None and call_signature == last_failed_call:
+                    logger.warning(
+                        f"[AGENT] Blocked duplicate failed tool call on step {step}: {fn_name} with {args_canonical}"
                     )
+                    duplicate_error_res = {
+                        "success": False,
+                        "error": (
+                            f"DUPLICATE_CALL_BLOCKED: You just called '{fn_name}' with the exact same arguments and it failed. "
+                            f"Do NOT repeat this identical call. "
+                            f"Read the previous error message, remove the invalid parameter(s) from your arguments, "
+                            f"or answer the user in conversational text."
+                        ),
+                        "cart": self.cart.get_state_snapshot(),
+                    }
+                    internal_tool_trace.append(
+                        {"name": fn_name, "arguments": fn_args, "result": duplicate_error_res}
+                    )
+                    self.history.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": call_id,
+                            "name": fn_name,
+                            "content": json.dumps(duplicate_error_res, ensure_ascii=False),
+                        }
+                    )
+                    continue
+
+                # 1. Local Cart Tools (Including clear_cart)
+                if fn_name in ("add_item", "edit_item", "remove_item", "clear_cart"):
+                    tool_result = self.cart.execute_tool(fn_name, fn_args)
+                    is_success = tool_result.get("success", False)
+
+                    logger.info(
+                        f"[TOOL RESULT] {fn_name} -> success={is_success} | "
+                        f"Action: {tool_result.get('action', 'none')} | "
+                        f"Cart Total: €{self.cart.total_price:.2f}"
+                    )
+
+                    if not is_success:
+                        last_failed_call = call_signature
+                    else:
+                        last_failed_call = None
 
                     if self.cart.modified_in_current_turn:
                         self.awaiting_confirmation = False
@@ -166,6 +221,7 @@ class FoodOrderAgent:
                         "special_instructions": self.cart.special_instructions,
                         "cart": self.cart.get_state_snapshot(),
                     }
+                    last_failed_call = None
                     logger.info(f"[TOOL RESULT] set_special_instructions -> \"{self.cart.special_instructions}\"")
                     internal_tool_trace.append(
                         {"name": fn_name, "arguments": fn_args, "result": tool_result}
@@ -216,14 +272,14 @@ class FoodOrderAgent:
 
                     if self.cart.modified_in_current_turn or not was_ready_to_submit:
                         logger.info(
-                            f"[MCP GUARD] Blocked premature submission. Prompting confirmation for ${self.cart.total_price:.2f}"
+                            f"[MCP GUARD] Blocked premature submission. Prompting confirmation for €{self.cart.total_price:.2f}"
                         )
                         self.awaiting_confirmation = True
                         guard_res = {
                             "status": "CONFIRMATION_REQUIRED_FIRST",
                             "instruction": (
                                 f"Do NOT submit the order yet. Summarize the current order items and exact "
-                                f"total price (${self.cart.total_price:.2f}) and ask the user: 'Ready to submit?'"
+                                f"total price (€{self.cart.total_price:.2f}) and ask the user: 'Ready to submit?'"
                             ),
                             "cart": self.cart.get_state_snapshot(),
                         }
@@ -285,8 +341,10 @@ class FoodOrderAgent:
                         self.cart.mark_submitted(order_id=mcp_result.get("order_id"))
                         self.awaiting_confirmation = False
                         self.can_retry_submission = False
+                        last_failed_call = None
                     else:
                         self.can_retry_submission = True
+                        last_failed_call = call_signature
 
                     self.history.append(
                         {
@@ -300,6 +358,7 @@ class FoodOrderAgent:
                 else:
                     logger.warning(f"[TOOL CALL] Unknown tool requested: '{fn_name}'")
                     unknown_res = {"success": False, "error": f"Unknown tool '{fn_name}'."}
+                    last_failed_call = call_signature
                     self.history.append(
                         {
                             "role": "tool",
@@ -308,7 +367,10 @@ class FoodOrderAgent:
                             "content": json.dumps(unknown_res, ensure_ascii=False),
                         }
                     )
-
+        
+        # Clean thinking tags from assistant output
+        final_agent_text = _sanitize_agent_text(final_agent_text)
+        
         if not final_agent_text:
             final_agent_text = self._build_fallback_text(exposed_tool_calls)
 
@@ -317,6 +379,11 @@ class FoodOrderAgent:
             agent_text=final_agent_text,
             exposed_tool_calls=exposed_tool_calls,
         )
+
+        # -------------------------------------------------------------
+        # PRUNE CONSECUTIVE IDENTICAL FAILURES FROM HISTORY
+        # -------------------------------------------------------------
+        self._prune_history_failures()
 
         self.last_turn_log = self.turn_logger.log_turn(
             user_message=user_text,
@@ -332,6 +399,76 @@ class FoodOrderAgent:
             result_payload["tool_calls"] = exposed_tool_calls
 
         return result_payload
+
+    def _prune_history_failures(self) -> None:
+        """
+        Collapses consecutive duplicate failed tool cycles in self.history to a single instance.
+        Prevents cross-turn context contamination when the model repeats an invalid call.
+        """
+        if len(self.history) <= 2:
+            return
+
+        def _calls_sig(calls: list[dict[str, Any]]) -> list[tuple[str, str]]:
+            return [
+                (
+                    c.get("function", {}).get("name", ""),
+                    json.dumps(c.get("function", {}).get("arguments", {}), sort_keys=True),
+                )
+                for c in calls
+            ]
+
+        pruned: list[dict[str, Any]] = [self.history[0]]  # Keep system prompt
+        i = 1
+
+        while i < len(self.history):
+            msg = self.history[i]
+
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                curr_calls = msg.get("tool_calls", [])
+                curr_sig = _calls_sig(curr_calls)
+
+                # Gather all tool responses corresponding to this assistant turn
+                tool_msgs: list[dict[str, Any]] = []
+                j = i + 1
+                while j < len(self.history) and self.history[j].get("role") == "tool":
+                    tool_msgs.append(self.history[j])
+                    j += 1
+
+                # Check if all tool responses in this cycle were failures
+                all_failed = len(tool_msgs) > 0 and all(
+                    json.loads(tm.get("content", "{}")).get("success") is False
+                    for tm in tool_msgs
+                    if tm.get("content")
+                )
+
+                # Check if pruned already ends with the exact same failed assistant+tool cycle
+                is_duplicate = False
+                if all_failed and len(pruned) >= 2 and pruned[-1].get("role") == "tool":
+                    # Find previous assistant message in pruned
+                    prev_asst_idx = None
+                    for k in range(len(pruned) - 1, -1, -1):
+                        if pruned[k].get("role") == "assistant":
+                            prev_asst_idx = k
+                            break
+
+                    if prev_asst_idx is not None:
+                        prev_sig = _calls_sig(pruned[prev_asst_idx].get("tool_calls", []))
+                        if prev_sig == curr_sig:
+                            is_duplicate = True
+
+                if is_duplicate:
+                    logger.info("[AGENT] Pruned duplicate failed tool cycle from conversation history.")
+                    i = j
+                    continue
+
+                pruned.append(msg)
+                pruned.extend(tool_msgs)
+                i = j
+            else:
+                pruned.append(msg)
+                i += 1
+
+        self.history = pruned
 
     def _update_confirmation_state(
         self,
@@ -374,7 +511,7 @@ class FoodOrderAgent:
             return f"Sorry, the order couldn't be submitted — {err} Would you like me to try again?"
 
         if self.cart.lines:
-            return f"Your current total is ${self.cart.total_price:.2f}. Anything else?"
+            return f"Your current total is €{self.cart.total_price:.2f}. Anything else?"
             
-        # Don't ask "What can I get started" if the user has already spoken
         return "I didn't quite catch that. Could you repeat what you'd like to order?"
+    

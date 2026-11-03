@@ -167,9 +167,11 @@ class MenuCatalog:
         if unknown_opts:
             valid_opts = list(menu_item.options.keys())
             hint = self._build_cross_item_option_hint(unknown_opts)
+            sorted_unknown = sorted(unknown_opts)
             raise MenuValidationError(
-                f"Invalid option(s) {sorted(unknown_opts)} for '{menu_item.name}' ({item_id}). "
-                f"Allowed options for '{item_id}' are: {valid_opts}.{hint}"
+                f"Invalid option(s) {sorted_unknown} for '{menu_item.name}' ({item_id}). "
+                f"ACTION REQUIRED: You MUST remove {sorted_unknown} completely from your 'options' dictionary. "
+                f"Allowed options for '{item_id}' are only: {valid_opts}.{hint}"
             )
 
         # 2. Resolve each defined option on the menu item (user choice -> default -> error if required)
@@ -181,7 +183,7 @@ class MenuCatalog:
                 if user_choice not in opt_def.choices:
                     raise MenuValidationError(
                         f"Invalid choice '{user_choice}' for option '{opt_name}' on '{menu_item.name}' ({item_id}). "
-                        f"Valid choices for '{opt_name}' are: {opt_def.choices}."
+                        f"ACTION REQUIRED: Change '{opt_name}' to one of: {opt_def.choices}."
                     )
                 resolved_options[opt_name] = user_choice
             elif opt_def.default is not None:
@@ -195,7 +197,8 @@ class MenuCatalog:
         # 3. Validate extras against this specific item's allowed extras
         if provided_extras and not menu_item.extras:
             raise MenuValidationError(
-                f"'{menu_item.name}' ({item_id}) does not support any extras (received {provided_extras})."
+                f"'{menu_item.name}' ({item_id}) does not support any extras. "
+                f"ACTION REQUIRED: You MUST remove 'extras': {provided_extras} completely from your tool arguments."
             )
 
         valid_extra_set = set(menu_item.valid_extra_ids)
@@ -204,7 +207,8 @@ class MenuCatalog:
             hint = self._build_cross_item_extra_hint(invalid_extras)
             raise MenuValidationError(
                 f"Invalid extra(s) {invalid_extras} for '{menu_item.name}' ({item_id}). "
-                f"Allowed extras for '{item_id}' are: {menu_item.valid_extra_ids}.{hint}"
+                f"ACTION REQUIRED: You MUST remove {invalid_extras} from your 'extras' list. "
+                f"Allowed extras for '{item_id}' are only: {menu_item.valid_extra_ids}.{hint}"
             )
 
         # Deduplicate extras and sort them in canonical menu order so identical items merge cleanly
@@ -424,9 +428,9 @@ class MenuCatalog:
 
     def format_for_prompt(self) -> str:
         """Renders a compact, unambiguous reference sheet of the menu for the Gemini system prompt."""
-        lines: list[str] = ["MENU CATALOG (All prices in USD):"]
+        lines: list[str] = ["MENU CATALOG (All prices in EUR):"]
         for item in self.items:
-            lines.append(f"- {item.name} (item_id: '{item.id}', base_price: ${item.base_price:.2f})")
+            lines.append(f"- {item.name} (item_id: '{item.id}', base_price: €{item.base_price:.2f})")
             for opt_name, opt_def in item.options.items():
                 mods = ", ".join(
                     f"{c} ({opt_def.get_modifier(c):+.2f})" if opt_def.get_modifier(c) != 0 else c
@@ -439,7 +443,7 @@ class MenuCatalog:
                 )
                 lines.append(f"    • option '{opt_name}' [{req_tag}]: [{mods}]")
             if item.extras and item.extras.choices:
-                exts = ", ".join(f"{e.id} (+${e.price:.2f})" for e in item.extras.choices)
+                exts = ", ".join(f"{e.id} (+€{e.price:.2f})" for e in item.extras.choices)
                 lines.append(f"    • extras: [{exts}]")
             else:
                 lines.append("    • extras: none")

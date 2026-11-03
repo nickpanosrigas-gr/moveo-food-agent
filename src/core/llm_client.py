@@ -8,6 +8,10 @@ from typing import Any
 import httpx
 from config.settings import settings
 
+import re
+
+THINKING_REGEX = re.compile(r"<think>[\s\S]*?</think>|(?:\A|^)\s*</think>|<\/?think>", re.IGNORECASE)
+
 logger = logging.getLogger(__name__)
 
 
@@ -73,7 +77,7 @@ class LLMClient:
             "model": self.model,
             "messages": [
                 {"role": "system", "content": static_system_prompt},
-                {"role": "user", "content": "[LIVE CART CONTEXT]\nCURRENT CART STATE: Empty (0 items, Total: $0.00).\nAWAITING_FINAL_CONFIRMATION: False\n[/LIVE CART CONTEXT]\n\nUser: hi"},
+                {"role": "user", "content": "[LIVE CART CONTEXT]\nCURRENT CART STATE: Empty (0 items, Total: €0.00).\nAWAITING_FINAL_CONFIRMATION: False\n[/LIVE CART CONTEXT]\n\nUser: hi"},
             ],
             "tools": tools,
             "tool_choice": "auto",
@@ -105,7 +109,7 @@ class LLMClient:
             "model": self.model,
             "messages": [
                 {"role": "system", "content": static_system_prompt},
-                {"role": "user", "content": "[LIVE CART CONTEXT]\nCURRENT CART STATE: Empty (0 items, Total: $0.00).\nAWAITING_FINAL_CONFIRMATION: False\n[/LIVE CART CONTEXT]\n\nUser: hi"},
+                {"role": "user", "content": "[LIVE CART CONTEXT]\nCURRENT CART STATE: Empty (0 items, Total: €0.00).\nAWAITING_FINAL_CONFIRMATION: False\n[/LIVE CART CONTEXT]\n\nUser: hi"},
             ],
             "tools": tools,
             "tool_choice": "auto",
@@ -188,14 +192,17 @@ class LLMClient:
                 }
             )
 
-        # Fallback to reasoning_content if content is None
+        # Fallback to reasoning_content if content is None, but clean thinking tags
         content = msg.get("content")
         if content is None:
             content = msg.get("reasoning_content") or ""
 
+        # Clean any <think>...</think>, </think>, or orphaned tags
+        cleaned_content = THINKING_REGEX.sub("", str(content)).strip()
+
         out: dict[str, Any] = {
             "role": "assistant",
-            "content": str(content).strip(),
+            "content": cleaned_content,
         }
         if normalized_calls:
             out["tool_calls"] = normalized_calls

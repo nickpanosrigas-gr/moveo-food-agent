@@ -179,12 +179,20 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
         )}
 
         {/* Agent Thinking Indicator */}
-        {orbState === 'orange' && !streamingAgentMessage && (
-          <div className="flex items-center gap-2 text-amber-300/80 bg-amber-500/10 border border-amber-500/20 rounded-xl px-3.5 py-2 w-fit text-xs">
-            <Loader2 className="w-3.5 h-3.5 animate-spin text-amber-400" />
-            <span>Agent is thinking...</span>
-          </div>
-        )}
+          {orbState === 'orange' && !streamingAgentMessage && (
+            <div className="flex flex-col items-start transition-all">
+              <div className="flex items-end gap-2 max-w-[85%]">
+                <div className="w-6 h-6 rounded-full bg-amber-500/20 border border-amber-500/30 flex items-center justify-center text-amber-300 mb-1 flex-shrink-0 animate-pulse">
+                  <Bot className="w-3.5 h-3.5" />
+                </div>
+
+                <div className="flex items-center gap-2.5 px-4 py-3 rounded-2xl rounded-bl-xs text-sm leading-relaxed shadow-sm bg-amber-500/10 border border-amber-500/30 text-amber-200">
+                  <Loader2 className="w-4 h-4 animate-spin text-amber-400 flex-shrink-0" />
+                  <span>Agent is thinking...</span>
+                </div>
+              </div>
+            </div>
+          )}
 
         <div ref={messagesEndRef} />
       </div>

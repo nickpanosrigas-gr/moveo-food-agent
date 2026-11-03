@@ -227,7 +227,7 @@ export const OrderTicketHUD: React.FC<OrderTicketHUDProps> = ({
                           </span>
                         </div>
                         <span className="font-bold flex-shrink-0 pl-1">
-                          ${item.line_total.toFixed(2)}
+                          €{item.line_total.toFixed(2)}
                         </span>
                       </div>
 
@@ -296,20 +296,20 @@ export const OrderTicketHUD: React.FC<OrderTicketHUDProps> = ({
                 ITEMS ({cartState.total_item_count || 0})
               </span>
               <span className="text-lg font-bold tracking-tight">
-                TOTAL: ${total.toFixed(2)}
+                TOTAL: €{total.toFixed(2)}
               </span>
             </div>
 
-            {/* $50 Limit Progress Meter */}
+            {/* €50 Limit Progress Meter */}
             <div className="mt-1 mb-1.5">
               <div className="flex items-center justify-between text-xs text-black mb-1">
-                <span className="uppercase font-bold">$50.00 MAX LIMIT</span>
+                <span className="uppercase font-bold">€50.00 MAX LIMIT</span>
                 <span className="font-bold">
                   {isExceeded
                     ? 'LIMIT EXCEEDED'
                     : isAmberWarning
                     ? 'NEAR LIMIT'
-                    : `$${Math.max(0, limitCeiling - total).toFixed(2)} LEFT`}
+                    : `€${Math.max(0, limitCeiling - total).toFixed(2)} LEFT`}
                 </span>
               </div>
 
@@ -344,7 +344,7 @@ export const OrderTicketHUD: React.FC<OrderTicketHUDProps> = ({
             {isExceeded && !cartState.is_submitted && (
               <div className="mt-1.5 py-1 border border-black text-center font-bold text-xs uppercase tracking-wider flex items-center justify-center gap-1 bg-black/5">
                 <AlertTriangle className="w-3.5 h-3.5 text-black" />
-                <span>OVER $50 RESTAURANT CAP</span>
+                <span>OVER €50 RESTAURANT CAP</span>
               </div>
             )}
 
