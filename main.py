@@ -45,8 +45,11 @@ def main() -> None:
             if user_input.lower() in ("quit", "exit"):
                 break
 
+            print()
+
             try:
                 response = agent.send(user_input)
+                print()
                 print(f"Agent: {response['message']}")
 
                 if "tool_calls" in response:

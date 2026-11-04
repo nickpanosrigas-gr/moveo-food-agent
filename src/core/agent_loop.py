@@ -101,6 +101,16 @@ class FoodOrderAgent:
         return self.llm.unload_model_sync()
 
     def send(self, message: str, force_failure: str | None = None) -> dict[str, Any]:
+        user_text = (message or "").strip()
+        
+        # Defense-in-depth: intercept empty/non-alphanumeric messages
+        if not re.sub(r"[^\w]", "", user_text):
+            fallback_text = "Sorry, I couldn't hear you."
+            return {
+                "message": fallback_text,
+                "tool_calls": [],
+            }
+
         if force_failure and force_failure != "none":
             self.force_failure_mode = force_failure
 

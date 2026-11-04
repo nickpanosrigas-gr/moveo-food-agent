@@ -6,6 +6,7 @@ import json
 import logging
 import time
 import uuid
+import re
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Literal
 
@@ -31,6 +32,22 @@ logger = logging.getLogger("server.app")
 FailureModeType = Literal["none", "kitchen_busy", "server_error", "schema_error", "business_refusal"]
 INACTIVITY_TIMEOUT_SECONDS = 900
 
+WHISPER_SILENCE_HALLUCINATIONS = {
+    "", "you", "thanks for watching",
+    "thanks for watching.", "bye", "bye.", "so", "[blank_audio]",
+    "[applause]", "[music]"
+}
+
+def is_empty_or_silence(text: str) -> bool:
+    """Checks whether text is empty, whitespace, only punctuation, or an STT hallucination."""
+    if not text:
+        return True
+    cleaned = text.strip()
+    # Strip everything except letters and numbers
+    alphanumeric = re.sub(r"[^\w]", "", cleaned)
+    if not alphanumeric:
+        return True
+    return cleaned.lower() in WHISPER_SILENCE_HALLUCINATIONS
 
 class SessionManager:
     def __init__(self, speech_client: SpeechClientProtocol):
@@ -304,6 +321,55 @@ async def _stream_agent_turn(
         yield _ndjson_line({"type": "error", "error": str(exc)})
 
 
+async def _stream_fallback_turn(
+    agent: FoodOrderAgent,
+    fallback_message: str = "Sorry, I couldn't hear you.",
+) -> AsyncIterator[bytes]:
+    """Streams a canned fallback message with TTS without invoking the LLM or mutating history."""
+    yield _ndjson_line(
+        {
+            "type": "turn_metadata",
+            "full_message": fallback_message,
+            "tool_calls": [],
+            "cart_state": agent.cart.get_state_snapshot(),
+            "turn_log": None,
+            "mcp_payload": None,
+        }
+    )
+
+    try:
+        async for chunk_event in speech_client.synthesize_stream(
+            full_text=fallback_message,
+            keep_alive=INACTIVITY_TIMEOUT_SECONDS,
+        ):
+            yield _ndjson_line(
+                {
+                    "type": "agent_chunk",
+                    "chunk_index": chunk_event["chunk_index"],
+                    "total_chunks": chunk_event["total_chunks"],
+                    "is_final": chunk_event["is_final"],
+                    "text_chunk": chunk_event["text_chunk"],
+                    "audio_b64": chunk_event["audio_b64"],
+                    "sample_rate": chunk_event["sample_rate"],
+                }
+            )
+    except Exception as tts_exc:
+        logger.error(f"[TTS] Fallback synthesis error: {tts_exc}", exc_info=True)
+        yield _ndjson_line(
+            {
+                "type": "agent_chunk",
+                "chunk_index": 0,
+                "total_chunks": 1,
+                "is_final": True,
+                "text_chunk": fallback_message,
+                "audio_b64": None,
+                "sample_rate": 24000,
+            }
+        )
+
+    yield _ndjson_line({"type": "turn_complete"})
+
+
 @app.get("/api/config")
 async def get_config_endpoint() -> dict[str, str]:
     """Exposes the active engines to the frontend."""
@@ -319,6 +385,14 @@ async def chat_text_endpoint(req: TextChatRequest) -> StreamingResponse:
     if getattr(session_manager, "_warmup_task", None) and not session_manager._warmup_task.done():
         await session_manager._warmup_task
     await session_manager.touch_session(req.session_id)
+
+    if is_empty_or_silence(req.message):
+        return StreamingResponse(
+            _stream_fallback_turn(agent=agent, fallback_message="Sorry, I couldn't hear you."),
+            media_type="application/x-ndjson",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
     return StreamingResponse(
         _stream_agent_turn(agent=agent, user_text=req.message, force_failure=req.force_failure),
         media_type="application/x-ndjson",
@@ -356,9 +430,15 @@ async def chat_voice_endpoint(
             yield _ndjson_line({"type": "error", "error": f"Speech-to-text failed: {stt_exc}"})
             return
 
-        if not transcribed_text.strip():
-            yield _ndjson_line({"type": "transcription", "text": "", "empty_speech": True})
-            yield _ndjson_line({"type": "turn_complete"})
+        # Short-circuit false-positive VAD triggers and empty speech
+        if is_empty_or_silence(transcribed_text):
+            logger.info("[STT] Silence or artifact detected. Emitting fallback clarification.")
+            yield _ndjson_line({"type": "transcription", "text": ""})
+            async for event_bytes in _stream_fallback_turn(
+                agent=agent,
+                fallback_message="Sorry, I couldn't hear you.",
+            ):
+                yield event_bytes
             return
 
         yield _ndjson_line({"type": "transcription", "text": transcribed_text})
