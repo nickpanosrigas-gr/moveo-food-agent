@@ -460,7 +460,11 @@ async def chat_voice_endpoint(
 @app.post("/api/session/start")
 async def start_session_endpoint(req: SessionLifecycleRequest) -> dict[str, Any]:
     agent = await session_manager.get_or_create_agent(req.session_id)
-    if not session_manager.models_loaded and any_service_uses_vram():
+    
+    # If warmup is already running, await existing task rather than firing duplicates
+    if getattr(session_manager, "_warmup_task", None) and not session_manager._warmup_task.done():
+        await session_manager._warmup_task
+    elif not session_manager.models_loaded and any_service_uses_vram():
         await session_manager._run_warmup(agent)
 
     return {

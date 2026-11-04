@@ -13,6 +13,7 @@ from __future__ import annotations
 import copy
 import json
 import re
+import signal
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -58,7 +59,6 @@ class Scenario:
 # Comparison Helpers
 # =====================================================================
 
-# Menu defaults map for graceful comparison if LLM lets backend fill default
 DEFAULT_OPTIONS_MAP = {
     "classic_burger": {"size": "regular", "patty": "beef"},
     "spicy_burger": {"size": "regular", "spice_level": "medium"},
@@ -90,7 +90,6 @@ def _item_matches(expected: dict[str, Any], actual: dict[str, Any]) -> bool:
     exp_opts = _normalize_options(expected.get("options"))
     act_opts = _normalize_options(actual.get("options"))
 
-    # Expected options must match actual, or match the default if omitted by actual
     for k, v in exp_opts.items():
         act_val = act_opts.get(k, default_opts.get(k))
         if act_val != v:
@@ -112,7 +111,6 @@ def compare_orders(expected: dict[str, Any], actual: dict[str, Any] | None) -> t
     if len(exp_items) != len(act_items):
         return False, f"Expected {len(exp_items)} item(s), but got {len(act_items)} item(s)."
 
-    # Bipartite matching for items (order-insensitive)
     matched_actual_indices = set()
     for exp_item in exp_items:
         found = False
@@ -126,62 +124,39 @@ def compare_orders(expected: dict[str, Any], actual: dict[str, Any] | None) -> t
         if not found:
             return False, f"Could not find matching actual item for expected: {json.dumps(exp_item, ensure_ascii=False)}"
 
-    # Compare special instructions using flexible keyword matching
     exp_instructions = (expected.get("special_instructions") or "").strip().lower()
     act_instructions = (actual.get("special_instructions") or "").strip().lower()
     if exp_instructions:
-      if not act_instructions:
-        return (
-            False,
-            f"Special instructions missing: expected keywords from"
-            f" '{exp_instructions}', but actual was empty.",
-        )
+        if not act_instructions:
+            return (
+                False,
+                f"Special instructions missing: expected keywords from '{exp_instructions}', but actual was empty.",
+            )
 
-      stop_words = {
-          "and",
-          "the",
-          "for",
-          "with",
-          "please",
-          "make",
-          "sure",
-          "that",
-          "all",
-          "into",
-          "it",
-          "is",
-          "to",
-          "in",
-          "on",
-          "a",
-          "an",
-      }
-      exp_words = [
-          w
-          for w in re.findall(r"[a-zA-Z0-9]+", exp_instructions)
-          if w not in stop_words
-      ]
+        stop_words = {
+            "and", "the", "for", "with", "please", "make", "sure",
+            "that", "all", "into", "it", "is", "to", "in", "on", "a", "an",
+        }
+        exp_words = [w for w in re.findall(r"[a-zA-Z0-9]+", exp_instructions) if w not in stop_words]
 
-      if exp_words:
+        if exp_words:
+            def _stem_match(kw: str, text: str) -> bool:
+                if kw in text:
+                    return True
+                for suffix in ("ed", "ing", "es", "s"):
+                    if kw.endswith(suffix) and len(kw) - len(suffix) >= 3:
+                        if kw[:-len(suffix)] in text:
+                            return True
+                return False
 
-        def _stem_match(kw: str, text: str) -> bool:
-          if kw in text:
-            return True
-          for suffix in ("ed", "ing", "es", "s"):
-            if kw.endswith(suffix) and len(kw) - len(suffix) >= 3:
-              if kw[: -len(suffix)] in text:
-                return True
-          return False
-
-        matched = [w for w in exp_words if _stem_match(w, act_instructions)]
-        match_ratio = len(matched) / len(exp_words)
-        if match_ratio < 0.6:  # Requires 60%+ of the key words/stems
-          return (
-              False,
-              f"Special instructions keyword mismatch: matched"
-              f" {len(matched)}/{len(exp_words)} keywords ({matched}). Expected"
-              f" keywords from '{exp_instructions}', got '{act_instructions}'",
-          )
+            matched = [w for w in exp_words if _stem_match(w, act_instructions)]
+            match_ratio = len(matched) / len(exp_words)
+            if match_ratio < 0.6:
+                return (
+                    False,
+                    f"Special instructions keyword mismatch: matched {len(matched)}/{len(exp_words)} "
+                    f"keywords ({matched}). Expected keywords from '{exp_instructions}', got '{act_instructions}'",
+                )
 
     return True, "Match"
 
@@ -224,7 +199,6 @@ def compare_turn_tools(expected_tools: list[ExpectedToolCall], actual_tools: lis
                     exp_o = _normalize_options(arg_v)
                     act_o = _normalize_options(act_args.get("options"))
                     for ok, ov in exp_o.items():
-                        # Accept if explicitly provided, or if omitted and equals menu default
                         val = act_o.get(ok, default_opts.get(ok))
                         if val != ov:
                             args_match = False
@@ -254,7 +228,7 @@ def compare_turn_tools(expected_tools: list[ExpectedToolCall], actual_tools: lis
 
 
 # =====================================================================
-# Test Runner
+# Test Runner Logic
 # =====================================================================
 
 def run_scenario(scenario: Scenario, mock_mcp: bool = True) -> dict[str, Any]:
@@ -342,6 +316,25 @@ def run_all_tests(scenarios: list[Scenario], suite_name: str = "Hard Conversatio
     temp_agent = FoodOrderAgent()
     print_banner(suite_name=suite_name, agent_model=temp_agent.llm.model)
 
+    print(f"Loading and warming up model ({temp_agent.llm.model})... ", end="", flush=True)
+    temp_agent.warmup_sync()
+    print("Done!\n")
+
+    unloaded = False
+
+    def _cleanup_resources(*_args: Any) -> None:
+        nonlocal unloaded
+        if not unloaded:
+            unloaded = True
+            print("\nUnloading model...", end=" ", flush=True)
+            temp_agent.unload_sync()
+            print("Done!")
+
+    try:
+        signal.signal(signal.SIGTERM, lambda *_a: (_cleanup_resources(), sys.exit(0)))
+    except (ValueError, AttributeError):
+        pass
+
     total_tests = len(scenarios)
     full_passes = 0
     partial_passes = 0
@@ -350,50 +343,53 @@ def run_all_tests(scenarios: list[Scenario], suite_name: str = "Hard Conversatio
     total_turns_count = 0
     wrong_turns_count = 0
 
-    for scenario in scenarios:
-        res = run_scenario(scenario)
-        total_turns_count += res["total_turns"]
-        wrong_turns_count += len(res["wrong_turns"])
+    try:
+        for scenario in scenarios:
+            res = run_scenario(scenario)
+            total_turns_count += res["total_turns"]
+            wrong_turns_count += len(res["wrong_turns"])
 
-        status = res["status"]
-        if status == "FULL":
-            full_passes += 1
-            print(f"✓ Scenario {res['scenario_id']}: {res['name']}")
-        elif status == "PARTIAL":
-            partial_passes += 1
-            print(f"~ Scenario {res['scenario_id']}: {res['name']}")
-            print("    [Wrong Turns]:")
-            for wt in res["wrong_turns"]:
-                print(f"      - Turn {wt['turn']} (User: '{wt['user_message']}'): {wt['reason']}")
-        else:  # FAIL
-            failures += 1
-            print(f"x Scenario {res['scenario_id']}: {res['name']}")
-            if res["wrong_turns"]:
+            status = res["status"]
+            if status == "FULL":
+                full_passes += 1
+                print(f"✓ Scenario {res['scenario_id']}: {res['name']}")
+            elif status == "PARTIAL":
+                partial_passes += 1
+                print(f"~ Scenario {res['scenario_id']}: {res['name']}")
                 print("    [Wrong Turns]:")
                 for wt in res["wrong_turns"]:
                     print(f"      - Turn {wt['turn']} (User: '{wt['user_message']}'): {wt['reason']}")
-            print("    [Final Order Mismatch]:")
-            print(f"      Reason: {res['final_reason']}")
-            print(f"      Expected Order: {json.dumps(res['expected_final_order'], indent=8)}")
-            print(f"      Actual Order:   {json.dumps(res['actual_final_order'], indent=8)}")
-        print()
+            else:  # FAIL
+                failures += 1
+                print(f"x Scenario {res['scenario_id']}: {res['name']}")
+                if res["wrong_turns"]:
+                    print("    [Wrong Turns]:")
+                    for wt in res["wrong_turns"]:
+                        print(f"      - Turn {wt['turn']} (User: '{wt['user_message']}'): {wt['reason']}")
+                print("    [Final Order Mismatch]:")
+                print(f"      Reason: {res['final_reason']}")
+                print(f"      Expected Order: {json.dumps(res['expected_final_order'], indent=8)}")
+                print(f"      Actual Order:   {json.dumps(res['actual_final_order'], indent=8)}")
+            print()
 
-    print("=================================================================")
-    print("                     TEST SUMMARY REPORT")
-    print("=================================================================")
-    print(f"Total Tests Run:     {total_tests}")
-    print(f"Full Pass (✓):   {full_passes}")
-    print(f"Partial Pass (~): {partial_passes}")
-    print(f"Failed (x):       {failures}")
-    print("-----------------------------------------------------------------")
-    print(f"Total Turns Run:     {total_turns_count}")
-    print(f"Total Correct Turns: {total_turns_count - wrong_turns_count}")
-    print(f"Total Wrong Turns:   {wrong_turns_count}")
-    print("=================================================================")
+        print("=================================================================")
+        print("                     TEST SUMMARY REPORT")
+        print("=================================================================")
+        print(f"Total Tests Run:     {total_tests}")
+        print(f"Full Pass (✓):       {full_passes}")
+        print(f"Partial Pass (~):    {partial_passes}")
+        print(f"Failed (x):          {failures}")
+        print("-----------------------------------------------------------------")
+        print(f"Total Turns Run:     {total_turns_count}")
+        print(f"Total Correct Turns: {total_turns_count - wrong_turns_count}")
+        print(f"Total Wrong Turns:   {wrong_turns_count}")
+        print("=================================================================")
+    finally:
+        _cleanup_resources()
 
 
 # =====================================================================
-# Hard Test Scenarios (16 to 25)
+# Scenarios (16 to 25)
 # =====================================================================
 
 HARD_SCENARIOS: list[Scenario] = [
@@ -410,7 +406,7 @@ HARD_SCENARIOS: list[Scenario] = [
             ),
             Turn(
                 user_message="And a large french fries with mushrooms.",
-                expected_tools=[],  # Reject invalid topping on fries
+                expected_tools=[],
             ),
             Turn(
                 user_message="Fine, no extras on the fries, but put the mushrooms on one of the pizzas instead.",
@@ -433,7 +429,7 @@ HARD_SCENARIOS: list[Scenario] = [
             ),
             Turn(
                 user_message="That's it.",
-                expected_tools=[],  # Confirmation summary required
+                expected_tools=[],
             ),
             Turn(
                 user_message="Yes, submit.",
@@ -468,7 +464,7 @@ HARD_SCENARIOS: list[Scenario] = [
         turns=[
             Turn(
                 user_message="I want a spicy burger with a gluten-free bun and an extra patty.",
-                expected_tools=[],  # Invalid items/options
+                expected_tools=[],
             ),
             Turn(
                 user_message="Okay, make it a classic burger with veggie patty and extra patty, and note that I'm allergic to sesame.",
@@ -478,7 +474,7 @@ HARD_SCENARIOS: list[Scenario] = [
             ),
             Turn(
                 user_message="Add a large milkshake.",
-                expected_tools=[],  # Missing flavor requirement
+                expected_tools=[],
             ),
             Turn(
                 user_message="Oreo milkshake with whipped cream, and make sure everything is sealed in separate bags.",
@@ -500,7 +496,7 @@ HARD_SCENARIOS: list[Scenario] = [
             ),
             Turn(
                 user_message="I'm all done.",
-                expected_tools=[],  # Summary
+                expected_tools=[],
             ),
             Turn(
                 user_message="Yes, go ahead.",
@@ -542,7 +538,7 @@ HARD_SCENARIOS: list[Scenario] = [
             ),
             Turn(
                 user_message="Make it large.",
-                expected_tools=[],  # Ambiguous pronoun
+                expected_tools=[],
             ),
             Turn(
                 user_message="Make both of them large.",
@@ -553,7 +549,7 @@ HARD_SCENARIOS: list[Scenario] = [
             ),
             Turn(
                 user_message="Add cheese to it.",
-                expected_tools=[],  # Ambiguous
+                expected_tools=[],
             ),
             Turn(
                 user_message="Add cheese to the spicy one, and add avocado to the other.",
@@ -564,7 +560,7 @@ HARD_SCENARIOS: list[Scenario] = [
             ),
             Turn(
                 user_message="Wait, switch the avocado over to the spicy burger instead!",
-                expected_tools=[],  # Invalid extra on spicy_burger
+                expected_tools=[],
             ),
             Turn(
                 user_message="Keep avocado on the classic burger, but add bacon to the spicy burger.",
@@ -574,7 +570,7 @@ HARD_SCENARIOS: list[Scenario] = [
             ),
             Turn(
                 user_message="That's everything.",
-                expected_tools=[],  # Confirmation summary
+                expected_tools=[],
             ),
             Turn(
                 user_message="Submit.",
@@ -621,7 +617,7 @@ HARD_SCENARIOS: list[Scenario] = [
             ),
             Turn(
                 user_message="Submit right now, I don't care about the limit.",
-                expected_tools=[],  # Over-limit guardrail
+                expected_tools=[],
             ),
             Turn(
                 user_message="Fine, make the milkshakes regular size instead of large.",
@@ -643,7 +639,7 @@ HARD_SCENARIOS: list[Scenario] = [
             ),
             Turn(
                 user_message="Can I add ranch dip?",
-                expected_tools=[],  # Invalid topping without onion rings
+                expected_tools=[],
             ),
             Turn(
                 user_message="Okay, change one of the pizzas to medium instead of large.",
@@ -659,7 +655,7 @@ HARD_SCENARIOS: list[Scenario] = [
             ),
             Turn(
                 user_message="That is finally it.",
-                expected_tools=[],  # Summary
+                expected_tools=[],
             ),
             Turn(
                 user_message="Yes, and add cherry on top to both shakes.",
@@ -712,7 +708,7 @@ HARD_SCENARIOS: list[Scenario] = [
         turns=[
             Turn(
                 user_message="I want a burger and a pizza.",
-                expected_tools=[],  # Ambiguous
+                expected_tools=[],
             ),
             Turn(
                 user_message="Classic burger with cheese, medium margherita with olives, and a milkshake.",
@@ -723,7 +719,7 @@ HARD_SCENARIOS: list[Scenario] = [
             ),
             Turn(
                 user_message="Make it pistachio flavor.",
-                expected_tools=[],  # Invalid flavor
+                expected_tools=[],
             ),
             Turn(
                 user_message="Strawberry milkshake with cherry on top.",
@@ -751,7 +747,7 @@ HARD_SCENARIOS: list[Scenario] = [
             ),
             Turn(
                 user_message="Add ranch dip to the pizza.",
-                expected_tools=[],  # Invalid extra
+                expected_tools=[],
             ),
             Turn(
                 user_message="Never mind then. Just make sure the pizza crust is well-done and sliced into 8 pieces.",
@@ -781,11 +777,11 @@ HARD_SCENARIOS: list[Scenario] = [
             ),
             Turn(
                 user_message="How much is my order right now and what's in it?",
-                expected_tools=[],  # Informational turn
+                expected_tools=[],
             ),
             Turn(
                 user_message="Looks good, submit it.",
-                expected_tools=[],  # Confirmation required first
+                expected_tools=[],
             ),
             Turn(
                 user_message="Yes, place the order.",
@@ -856,7 +852,7 @@ HARD_SCENARIOS: list[Scenario] = [
             Turn(
                 user_message="Yes.",
                 expected_tools=[
-                    ExpectedToolCall("submit_order", {}),
+                    ExpectedToolCall("submit_order", {})
                 ],
             ),
         ],
@@ -886,7 +882,7 @@ HARD_SCENARIOS: list[Scenario] = [
         turns=[
             Turn(
                 user_message="Add 0 classic burgers and -2 sodas.",
-                expected_tools=[],  # Reject invalid quantities
+                expected_tools=[],
             ),
             Turn(
                 user_message="Fine, give me 1 classic burger with cheese.",
@@ -896,16 +892,16 @@ HARD_SCENARIOS: list[Scenario] = [
             ),
             Turn(
                 user_message="Now remove 0 of that burger.",
-                expected_tools=[],  # Reject quantity 0 removal
+                expected_tools=[],
             ),
             Turn(
                 user_message="Keep it, that's my final order.",
-                expected_tools=[],  # Confirmation summary
+                expected_tools=[],
             ),
             Turn(
                 user_message="Submit order.",
                 expected_tools=[
-                    ExpectedToolCall("submit_order", {}),
+                    ExpectedToolCall("submit_order", {})
                 ],
             ),
         ],
@@ -948,12 +944,12 @@ HARD_SCENARIOS: list[Scenario] = [
             ),
             Turn(
                 user_message="That's it.",
-                expected_tools=[],  # Confirmation summary
+                expected_tools=[],
             ),
             Turn(
                 user_message="Yes.",
                 expected_tools=[
-                    ExpectedToolCall("submit_order", {}),
+                    ExpectedToolCall("submit_order", {})
                 ],
             ),
         ],
@@ -988,7 +984,7 @@ HARD_SCENARIOS: list[Scenario] = [
             Turn(
                 user_message="Yes.",
                 expected_tools=[
-                    ExpectedToolCall("submit_order", {}),
+                    ExpectedToolCall("submit_order", {})
                 ],
                 description="force kitchen_busy error",
             ),
@@ -1001,13 +997,13 @@ HARD_SCENARIOS: list[Scenario] = [
             Turn(
                 user_message="Yes, submit both now.",
                 expected_tools=[
-                    ExpectedToolCall("submit_order", {}),
+                    ExpectedToolCall("submit_order", {})
                 ],
             ),
             Turn(
                 user_message="Yes.",
                 expected_tools=[
-                    ExpectedToolCall("submit_order", {}),
+                    ExpectedToolCall("submit_order", {})
                 ],
             ),
         ],
@@ -1037,7 +1033,7 @@ HARD_SCENARIOS: list[Scenario] = [
         turns=[
             Turn(
                 user_message="I want a burger and a soda.",
-                expected_tools=[],  # Both ambiguous
+                expected_tools=[],
             ),
             Turn(
                 user_message="Classic burger with cheddar, and an orange soda.",
@@ -1055,12 +1051,12 @@ HARD_SCENARIOS: list[Scenario] = [
             ),
             Turn(
                 user_message="That's all.",
-                expected_tools=[],  # Summary
+                expected_tools=[],
             ),
             Turn(
                 user_message="Yes.",
                 expected_tools=[
-                    ExpectedToolCall("submit_order", {}),
+                    ExpectedToolCall("submit_order", {})
                 ],
             ),
         ],

@@ -75,32 +75,26 @@ class MCPOrderClient:
         special_instructions: str | None = None,
         force_failure: str | None = None,
     ) -> dict[str, Any]:
-        """
-        Prepares the `submit_order` arguments and optionally injects test mutations
-        for `schema_error` (-32602) or `business_refusal` (>$50 limit) when requested by the UI.
-        """
         import copy
         cloned_items = copy.deepcopy(items)
 
         if force_failure == "schema_error":
-            # Force a genuine JSON-RPC -32602 schema validation error on the remote MCP server
             if cloned_items:
-                cloned_items[0]["quantity"] = 0  # Violates `"minimum": 1` in MCP inputSchema
+                cloned_items[0]["quantity"] = 0
             else:
                 cloned_items = [{"item_id": "classic_burger", "quantity": 0}]
-            logger.info("[MCPOrderClient] Forcing 'schema_error' by sending quantity=0 to MCP server.")
 
         elif force_failure == "business_refusal":
-            # Force an order total > $50.00 to trigger a genuine MCP business refusal
             if cloned_items:
                 cloned_items[0]["quantity"] = max(int(cloned_items[0].get("quantity", 1)), 10)
             else:
                 cloned_items = [{"item_id": "margherita", "quantity": 5, "options": {"size": "large"}, "extras": []}]
-            logger.info("[MCPOrderClient] Forcing 'business_refusal' by inflating item quantity to exceed $50.")
 
         arguments: dict[str, Any] = {"items": cloned_items}
-        if special_instructions is not None:
+        # Only attach special_instructions if it is a non-empty string; omit on None to prevent -32602 schema errors
+        if special_instructions:
             arguments["special_instructions"] = special_instructions
+
         return arguments
     
     # -----------------------------------------------------------------

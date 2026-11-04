@@ -22,7 +22,8 @@ from src.utils.logger import TurnLogger
 logger = logging.getLogger(__name__)
 
 CHECKOUT_INTENT_REGEX = re.compile(
-    r"\b(that'?s\s+it|that\s+is\s+it|nothing\s+else|no\s+more|i'?m\s+done|all\s+set|submit|checkout|place\s+order)\b",
+    r"\b(that'?s\s+it|that\s+is\s+it|nothing\s+else|no\s+more|i'?m\s+done|all\s+set|submit|checkout|place\s+order|"
+    r"(dont|don't)\s+want\s+anything\s+else|let'?s\s+order|ready\s+to\s+order|order\s+now|that'?s\s+all)\b",
     re.IGNORECASE,
 )
 
@@ -102,21 +103,18 @@ class FoodOrderAgent:
 
     def send(self, message: str, force_failure: str | None = None) -> dict[str, Any]:
         user_text = (message or "").strip()
-        
+
         # Defense-in-depth: intercept empty/non-alphanumeric messages
         if not re.sub(r"[^\w]", "", user_text):
-            fallback_text = "Sorry, I couldn't hear you."
-            return {
-                "message": fallback_text,
-                "tool_calls": [],
-            }
+            return {"message": "Sorry, I couldn't hear you."}
 
         if force_failure and force_failure != "none":
             self.force_failure_mode = force_failure
 
         self.last_mcp_payload = None
-        user_text = (message or "").strip()
         self.cart.start_turn()
+
+        # Prior turn's confirmation status
         was_ready_to_submit = self.awaiting_confirmation or self.can_retry_submission
 
         contextualized_user_msg = format_user_turn_with_context(
@@ -208,7 +206,8 @@ class FoodOrderAgent:
                     else:
                         last_failed_call = None
 
-                    if self.cart.modified_in_current_turn:
+                    # TOOL CALLED: Instantly reset confirmation state so a new summary is mandatory
+                    if is_success:
                         self.awaiting_confirmation = False
                         self.can_retry_submission = False
                         was_ready_to_submit = False
@@ -330,9 +329,6 @@ class FoodOrderAgent:
                         special_instructions=self.cart.special_instructions,
                         force_failure=active_failure,
                     )
-                    submitted_in_this_turn = True
-
-                    logger.info(f"[MCP RESULT] submit_order -> {json.dumps(mcp_result, ensure_ascii=False)}")
 
                     self.last_mcp_payload = {
                         "name": "submit_order",
@@ -350,11 +346,14 @@ class FoodOrderAgent:
                     )
 
                     if mcp_result.get("success") is True:
+                        submitted_in_this_turn = True
                         self.cart.mark_submitted(order_id=mcp_result.get("order_id"))
                         self.awaiting_confirmation = False
                         self.can_retry_submission = False
                         last_failed_call = None
                     else:
+                        # Allow model to self-correct arguments in the same turn if schema failed
+                        submitted_in_this_turn = False
                         self.can_retry_submission = True
                         last_failed_call = call_signature
 
@@ -503,10 +502,8 @@ class FoodOrderAgent:
             )
         )
 
-        if asked_to_submit:
-            self.awaiting_confirmation = True
-        elif not self.cart.modified_in_current_turn and CHECKOUT_INTENT_REGEX.search(user_text):
-            self.awaiting_confirmation = True
+        # STRICT RULE: Awaiting confirmation is ONLY True if the agent explicitly asked the question this turn
+        self.awaiting_confirmation = asked_to_submit
 
     def _build_fallback_text(self, exposed_tool_calls: list[dict[str, Any]]) -> str:
         if exposed_tool_calls:
