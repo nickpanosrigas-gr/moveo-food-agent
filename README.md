@@ -1,397 +1,642 @@
-# Agentic Food Ordering Backend · NLP Engineer Assignment
+# Moveo AI — Agentic Food Ordering System (NLP Engineer Assignment)
 
-A deterministic, low-latency conversational food-ordering agent built in pure Python 3.13+. Designed without heavyweight orchestration frameworks (no LangChain/LangGraph), this backend implements a custom multi-step tool-calling state machine powered by a local **Ollama (`gemma4:12b`, 32k context)** LLM, strict **Pydantic** menu validation, **Decimal** price arithmetic, a **Streamable HTTP Model Context Protocol (MCP)** client, and a **FastAPI** streaming server with automated GPU VRAM lifecycle management.
+A production-ready conversational food ordering agent built in **Python 3.13+**. The system manages the complete food ordering lifecycle through natural language dialogue (both text and voice)—parsing and validating items against `menu.yaml`, managing complex multi-item modifications and stack splitting, enforcing a strict two-step confirmation protocol, and submitting final orders via the **Model Context Protocol (MCP)** Streamable HTTP transport.
 
 ---
 
 ## Table of Contents
 
-1. [System Architecture](#1-system-architecture)
-2. [Repository Structure](#2-repository-structure)
-3. [Setup & Installation](#3-setup--installation)
-4. [Usage & Entry Points](#4-usage--entry-points)
-   - [Interactive CLI (`main.py`)](#1-interactive-cli-mode)
-   - [Programmatic Python API (`agent.py`)](#2-programmatic-python-api)
-   - [FastAPI Streaming Server (`server/app.py`)](#3-fastapi-streaming-server)
-   - [Docker Deployment](#4-docker-deployment)
-5. [Core Engineering & Design Decisions](#5-core-engineering--design-decisions)
-   - [Pure-Python Agentic Loop & Prefix KV-Caching](#1-pure-python-agentic-loop--prefix-kv-caching)
-   - [Internal vs. Exposed Tool Calls Contract](#2-internal-vs-exposed-tool-calls-contract)
-   - [Two-Layer Menu Validation & Dynamic Schema Generation (`menu.py`)](#3-two-layer-menu-validation--dynamic-schema-generation-menupy)
-   - [Line-Based Cart Engine with Atomic "Split & Merge" (`cart.py`)](#4-line-based-cart-engine-with-atomic-split--merge-cartpy)
-   - [Streamable HTTP MCP Client & 3-Mode Failure Handling (`client.py`)](#5-streamable-http-mcp-client--3-mode-failure-handling-clientpy)
-   - [GPU VRAM Lifecycle & Session Watchdog (`app.py` & `speech.py`)](#6-gpu-vram-lifecycle--session-watchdog-apppy--speechpy)
-6. [Handled Edge Cases](#6-handled-edge-cases)
-7. [FastAPI NDJSON Streaming Protocol](#7-fastapi-ndjson-streaming-protocol)
-8. [Structured Logging & Observability](#8-structured-logging--observability)
+1. [Assignment Compliance & Core Capabilities](#1-assignment-compliance--core-capabilities)
+2. [System Architecture & Request Lifecycle](#2-system-architecture--request-lifecycle)
+   - [End-to-End Turn Flow (`agent_loop.py`)](#end-to-end-turn-flow-agent_looppy)
+   - [Internal vs. Exposed Tool Separation (Requirement #6)](#internal-vs-exposed-tool-separation-requirement-6)
+   - [KV-Cache Optimization & Dynamic User Context Injection (`prompts.py`)](#kv-cache-optimization--dynamic-user-context-injection-promptspy)
+3. [Core Domain Engine (`src/core/`)](#3-core-domain-engine-srccore)
+   - [Menu Catalog & Schema Validation (`menu.py`)](#1-menu-catalog--schema-validation-menupy)
+   - [Transactional Order Cart Engine (`cart.py`)](#2-transactional-order-cart-engine-cartpy)
+4. [LLM & Speech Routing Layer (`src/clients/` & `server/`)](#4-llm--speech-routing-layer-srcclients--server)
+   - [Environment-Driven Model Router (`router.py`)](#environment-driven-model-router-routerpy)
+   - [Local LLM Backend: `llama.cpp` (`llama-server`) with Qwen 3.6 35B](#local-llm-backend-llamacpp-llama-server-with-qwen-36-35b)
+   - [Cloud LLM & Voice Backend: Mistral AI API](#cloud-llm--voice-backend-mistral-ai-api)
+   - [Resilience & Exponential Backoff Retry Engine (`errors.py`)](#resilience--exponential-backoff-retry-engine-errorspy)
+5. [MCP Client & Specification Rejection Handling (`src/mcp/client.py`)](#5-mcp-client--specification-rejection-handling-srcmcpclientpy)
+   - [Authentication & Failure Injection](#authentication--failure-injection)
+   - [Handling All Three Specification Rejection Paths](#handling-all-three-specification-rejection-paths)
+6. [Repository Structure](#6-repository-structure)
+7. [Environment Configuration (`.env`)](#7-environment-configuration-env)
+8. [Running the Application (CLI, Backend & Web UI)](#8-running-the-application-cli-backend--web-ui)
+   - [1. Interactive CLI (`main.py`)](#1-interactive-cli-mainpy)
+   - [2. Programmatic Python API (`agent.py`)](#2-programmatic-python-api-agentpy)
+   - [3. FastAPI Streaming Backend Server (`server/app.py`)](#3-fastapi-streaming-backend-server-serverapppy)
+   - [4. React Voice & Web UI (Launched from the Root Directory)](#4-react-voice--web-ui-launched-from-the-root-directory)
+9. [Docker & Docker Compose Deployment](#9-docker--docker-compose-deployment)
+10. [Test Suites & Verification (`tests/`)](#10-test-suites--verification-tests)
+    - [Instant Unit Tests (`pytest`)](#1-instant-unit-tests-pytest)
+    - [End-to-End Conversational Evaluation Suites (25 Scenarios)](#2-end-to-end-conversational-evaluation-suites-25-scenarios)
+11. [Structured Turn Logging (`src/utils/logger.py`)](#11-structured-turn-logging-srcutilsloggerpy)
 
 ---
 
-## 1. System Architecture
+## 1. Assignment Compliance & Core Capabilities
+
+| # | Assignment Requirement | Implementation Mechanism | Reference Files |
+| :--- | :--- | :--- | :--- |
+| **1** | **Parse `menu.yaml` & Validate Orders** | Parses `menu.yaml` into strict Pydantic models with automatic default resolution, cross-item hallucination detection, missing required option catches (the "Milkshake Trap"), and exact `Decimal` price math. | `src/core/menu.py` |
+| **2** | **Add, Modify & Remove Items** | Transactional `OrderCart` supporting `add_item`, delta-based `edit_item`, `remove_item`, and `clear_cart`. Merges identical items by canonical signature, splits stacked quantities on partial edits (`target_quantity`), and guarantees atomic rollback on invalid edits. | `src/core/cart.py` |
+| **3** | **Confirm Order Before Submission** | Dual-layer protection: static system prompt directives + a deterministic intercept in `FoodOrderAgent.send()` that blocks `submit_order` if the cart was modified in the current turn or if confirmation was not requested beforehand. | `src/core/agent_loop.py`<br>`src/core/prompts.py` |
+| **4** | **Call `submit_order` via MCP & Handle Responses** | Connects to Moveo's Streamable HTTP MCP server using `X-Applicant-Email`. Normalizes all three rejection modes: JSON-RPC `-32602` schema errors (`isError: true`), server errors (`kitchen_busy`), and business refusals (`> $50.00` limit). | `src/mcp/client.py` |
+| **5** | **Structured Turn Logging** | Thread-safe `TurnLogger` recording every turn in newline-delimited JSON (`logs/conversation_turns.jsonl` or `logs/session_<id>.jsonl`) with ISO timestamps, session ID, user/agent text, exposed tool calls, internal cart actions, and cart snapshots. | `src/utils/logger.py` |
+| **6** | **Two Entry Points (`main.py` & `agent.py`)** | Interactive terminal CLI (`python main.py`) and programmatic API (`from agent import FoodOrderAgent` with `agent.send(msg) -> dict`). Strictly separates internal cart tools from exposed `response["tool_calls"]`. | `main.py`<br>`agent.py` |
+| **7** | **Bonus: Full Voice Agent (STT + TTS)** | Real-time NDJSON streaming pipeline pairing Faster-Whisper STT (`large-v3-turbo`) with Kokoro-82M TTS (or Mistral Realtime STT/TTS), backed by a Whisper silence-hallucination filter and VRAM watchdog. | `server/app.py`<br>`server/speech.py`<br>`server/mistral_speech.py` |
+
+---
+
+## 2. System Architecture & Request Lifecycle
 
 ```text
-                       ┌───────────────────────────────────────────────┐
-                       │              Entry Interfaces                 │
-                       │  1. CLI (`python main.py`)                    │
-                       │  2. Python SDK (`from agent import ...`)      │
-                       │  3. FastAPI Server (`server/app.py` :8000)    │
-                       └───────────────────────┬───────────────────────┘
+                            User Input (CLI / Python API / Web UI)
                                                │
                                                ▼
-┌──────────────────────────────────────────────────────────────────────────────────────────────┐
-│                                  `FoodOrderAgent` (`src/core/agent_loop.py`)                 │
-│                                                                                              │
-│  ┌──────────────────────────────┐     Tool Calls      ┌───────────────────────────────────┐  │
-│  │   `OllamaClient`             │ ──────────────────► │  Internal Cart Tools (`cart.py`)  │  │
-│  │   - Model: `gemma4:12b`      │                     │  - `add_item`                     │  │
-│  │   - Context: 32,000 tokens   │ ◄────────────────── │  - `edit_item` (Split & Merge)    │  │
-│  │   - Static Prefix KV-Cache   │     Tool Results    │  - `remove_item`                  │  │
-│  │   - `think: False`           │                     │  - `set_special_instructions`     │  │
-│  └──────────────────────────────┘                     └─────────────────┬─────────────────┘  │
-│                 │                                                       │                    │
-│                 │ Confirmed `submit_order`                              │ Validates against  │
-│                 ▼                                                       ▼                    │
-│  ┌──────────────────────────────┐                     ┌───────────────────────────────────┐  │
-│  │   `MCPOrderClient`           │                     │  `MenuCatalog` (`menu.py`)        │  │
-│  │   - Streamable HTTP          │                     │  - Parses `menu.yaml`             │  │
-│  │   - `X-Applicant-Email`      │                     │  - Resolves option defaults       │  │
-│  │   - Handles `-32602`,        │                     │  - Enforces required choices      │  │
-│  │     business refusals (>$50),│                     │  - Exact `Decimal` price math     │  │
-│  │     and `kitchen_busy`       │                     │  - Generates strict JSON schemas  │  │
-│  └──────────────┬───────────────┘                     └───────────────────────────────────┘  │
-└─────────────────┼────────────────────────────────────────────────────────────────────────────┘
-                  │
-                  ▼
-   [ Moveo Remote MCP Server ]
+                      ┌──────────────────────────────────────────────────┐
+                      │           FoodOrderAgent.send(message)           │
+                      │             (src/core/agent_loop.py)             │
+                      └────────────────────────┬─────────────────────────┘
+                                               │
+               1. Prepend [LIVE CART CONTEXT] & AWAITING_FINAL_CONFIRMATION flag
+                                               │
+                                               ▼
+                      ┌──────────────────────────────────────────────────┐
+                      │          LLM Router (src/clients/router.py)      │
+                      ├────────────────────────┬─────────────────────────┤
+                      │ LLM_PROVIDER=          │ LLM_PROVIDER=           │
+                      │ llama-server           │ mistral                 │
+                      │ LlamaClient            │ MistralClient           │
+                      │ (Qwen 3.6 35B Local)   │ (Mistral Cloud API)     │
+                      └────────────────────────┴────────────┬────────────┘
+                                                            │
+                               2. Multi-Step Tool Loop (max_steps=6)
+                                                            │
+                   ┌────────────────────────────────────────┴────────────────────────────────────────┐
+                   ▼                                                                                 ▼
+    [ Internal Cart & Menu Tools ]                                                    [ External MCP Tool ]
+    (`add_item`, `edit_item`, `remove_item`,                                            (`submit_order`)
+     `set_special_instructions`, `clear_cart`)                                               │
+                   │                                                         3. Confirmation & Guardrail Intercepts
+                   ▼                                                                         │
+         OrderCart & MenuCatalog                                                             ▼
+    - Validates against `menu.yaml`                                                    MCPOrderClient
+    - Auto-merges / splits item stacks                                     (Streamable HTTP + X-Applicant-Email)
+    - Resets `awaiting_confirmation = False`                                                 │
+    - Hidden from `response["tool_calls"]`                                    - Exposed in `response["tool_calls"]`
+                   │                                                          - Normalizes -32602, >$50, kitchen_busy
+                   └────────────────────────────────────────┬────────────────────────────────┘
+                                                            │
+                               4. Prune Duplicate Failed Cycles & Log Turn
+                                                            │
+                                                            ▼
+                      ┌──────────────────────────────────────────────────┐
+                      │         TurnLogger (src/utils/logger.py)         │
+                      │       Appends turn JSONL record to disk          │
+                      └────────────────────────┬─────────────────────────┘
+                                               │
+                                               ▼
+                          Returns `{"message": str, "tool_calls": [...]}`
 ```
+
+### End-to-End Turn Flow (`agent_loop.py`)
+
+When `agent.send(message, force_failure=None)` is called, `FoodOrderAgent` coordinates a deterministic 7-stage pipeline:
+
+1. **Input Sanitization & Turn Initialization:**
+   - Strips whitespace and verifies non-empty alphanumeric content. Empty strings or audio silence artifacts instantly return `"Sorry, I couldn't hear you."` without wasting LLM tokens or modifying history.
+   - Invokes `self.cart.start_turn()`, resetting `modified_in_current_turn = False`.
+   - Snapshots whether the agent was ready to submit entering this turn: `was_ready_to_submit = self.awaiting_confirmation or self.can_retry_submission`.
+
+2. **Dynamic Cart Context Wrapping:**
+   - Rather than mutating the static system prompt on every turn (which destroys local LLM KV prompt caching), `format_user_turn_with_context()` prepends a `[LIVE CART CONTEXT]` block directly to the user message. This block contains every active line item with prices, options, extras, special instructions, `$50.00` budget status, and the `AWAITING_FINAL_CONFIRMATION` boolean.
+
+3. **Multi-Step Tool Loop (`max_steps = 6`):**
+   - Dispatches `self.history` and `self.tools` to the active LLM client at `temperature=0.1`.
+   - If the model returns natural language with no tool calls, the loop terminates.
+   - If the model emits tool calls, each call is processed sequentially:
+     - **Duplicate Failed Call Breaker:** If the model repeats the exact same tool name and JSON arguments that failed on the immediately preceding step, the loop intercepts the call with `DUPLICATE_CALL_BLOCKED`, forcing the LLM to either repair its arguments or reply in plain text.
+     - **Internal Cart Tools (`add_item`, `edit_item`, `remove_item`, `clear_cart`, `set_special_instructions`):** Executed locally against `self.cart`. On any successful modification, `awaiting_confirmation`, `can_retry_submission`, and `was_ready_to_submit` are immediately reset to `False` (**"Cold Feet" protection**: if a user says *"Yes, and add a cola"*, the agent adds the cola and asks for confirmation of the new total rather than prematurely submitting).
+     - **External MCP Tool (`submit_order`):** Protected by three programmatic guardrails:
+       1. *Duplicate Guard:* Blocks multiple `submit_order` executions in the same turn.
+       2. *Empty Cart Guard:* Rejects submission if `cart.lines` is empty.
+       3. *Premature Submission Guard:* If `cart.modified_in_current_turn` is `True` or `was_ready_to_submit` is `False`, the call is intercepted with `CONFIRMATION_REQUIRED_FIRST`. The agent sets `awaiting_confirmation = True` and prompts the user with the exact total price.
+       - When valid, `self.mcp_client.submit_order()` executes over Streamable HTTP. The resulting payload is appended to `exposed_tool_calls`.
+
+4. **Thinking Tag Sanitization (`_sanitize_agent_text`):**
+   - Strips reasoning traces (`<think>...</think>`) emitted by reasoning models (such as Qwen 2.5/3.6 or DeepSeek), leaving clean conversational text for chat display and TTS synthesis.
+
+5. **Confirmation State Transition (`_update_confirmation_state`):**
+   - Automatically sets `awaiting_confirmation = True` for the subsequent turn if the agent explicitly asked a confirmation question (e.g., *"Ready to submit?"*, *"Shall I place your order?"*) or if the user indicated checkout intent on an unmodified cart.
+
+6. **History Pruning (`_prune_history_failures`):**
+   - Collapses consecutive duplicate failed tool cycles in `self.history` into a single entry to prevent conversational context degradation over long multi-turn interactions.
+
+7. **Structured Turn Persistence:**
+   - Appends the full turn snapshot (user message, agent message, exposed tools, internal cart trace, and cart state) to the active JSONL log file via `TurnLogger`.
+
+### Internal vs. Exposed Tool Separation (Requirement #6)
+
+The assignment specification requires that modifying or adding items returns:
+```json
+{
+  "message": "Large Classic Burger with cheese. Anything else?"
+}
+```
+Only when the user explicitly confirms and the order is submitted via the MCP server should `tool_calls` appear in the response:
+```json
+{
+  "message": "Order submitted! Order #ORD-12345. Estimated time: 15-20 minutes.",
+  "tool_calls": [
+    {
+      "name": "submit_order",
+      "arguments": {
+        "items": [
+          {
+            "item_id": "classic_burger",
+            "quantity": 1,
+            "options": {"size": "regular", "patty": "beef"},
+            "extras": ["cheese"]
+          }
+        ],
+        "special_instructions": null
+      },
+      "result": {
+        "success": true,
+        "order_id": "ORD-12345",
+        "total": 9.50,
+        "estimated_time": "15-20 minutes"
+      }
+    }
+  ]
+}
+```
+
+`FoodOrderAgent` strictly enforces this boundary: all internal catalog and cart modifications (`add_item`, `edit_item`, `remove_item`, `clear_cart`, `set_special_instructions`) are recorded under `internal_cart_actions` for structured telemetry, while `response["tool_calls"]` is populated exclusively when `submit_order` is executed.
+
+### KV-Cache Optimization & Dynamic User Context Injection (`prompts.py`)
+
+Local 35B models can suffer substantial Time-To-First-Token (TTFT) latency if system prompts mutate between dialogue turns. `build_static_system_prompt()` constructs an immutable system prompt prefix containing:
+- **Action-First Directives:** Mandatory tool calling rules (never claim an item was added without executing `add_item`).
+- **Voice & TTS Delivery Rules:** Concise 1–2 sentence responses with zero Markdown (no asterisks, bullet points, or tables).
+- **Category Playbooks:** Disambiguation logic for generic burger requests, the required Milkshake flavor rule, and soda flavor mappings (e.g., "Sprite" $\rightarrow$ `lemon_lime`, "Coke" $\rightarrow$ `cola`).
+- **Budget Threshold Protocols:** Rules governing totals under `$40.00` (*"Anything else?"*), between `$40.00–$50.00` (*near limit, offer checkout*), and above `$50.00` (*restaurant cap exceeded*).
+- **Menu Reference:** A clean, plain-text representation of `menu.yaml`.
+
+Because this system prompt (`history[0]`) and the tool definitions never change, `llama-server` pins them in slot `0` (`cache_prompt: true`), resulting in near-instant prompt processing on subsequent turns.
 
 ---
 
-## 2. Repository Structure
+## 3. Core Domain Engine (`src/core/`)
+
+### 1. Menu Catalog & Schema Validation (`menu.py`)
+
+`MenuCatalog.from_yaml("menu.yaml")` serves as the authoritative source of truth for items, options, extras, and pricing:
+
+- **Deterministic Default Fills:** Automatically resolves omitted optional fields to their configured defaults (e.g., `classic_burger` defaults to `size="regular"`, `patty="beef"`; `margherita` defaults to `size="medium"`, `crust="regular"`).
+- **The "Milkshake Trap" Protection:** In `menu.yaml`, `milkshake` defines `flavor` as `required: true` with **no default value**. If an LLM attempts to call `add_item(item_id="milkshake")` without a flavor, `validate_and_resolve()` raises a `MenuValidationError` detailing `[vanilla, chocolate, strawberry, oreo]`, prompting the agent to ask the user.
+- **Cross-Item Hallucination Guard:** If the model attempts to apply an option or extra belonging to another item (e.g., specifying `patty="chicken"` on a `spicy_burger` or requesting `extra_patty` on `fries`), the validator rejects the call and provides a hint indicating which item supports that customization.
+- **Exact Decimal Price Arithmetic:** Base prices, negative size discounts (e.g., `-$2.00` for small pizza, `-$1.00` for small fries), and extras are calculated using `decimal.Decimal` with `ROUND_HALF_UP` quantization to eliminate floating-point drift.
+- **Canonical Extra Ordering:** Extras are deduplicated and sorted in the exact sequence declared in `menu.yaml`, ensuring that identical customizations always generate identical signatures.
+
+### 2. Transactional Order Cart Engine (`cart.py`)
+
+`OrderCart` manages session items as `CartLineItem` records (`line_1`, `line_2`, ...):
+
+- **Signature Auto-Merging:** Each line computes a canonical tuple: `(item_id, tuple(sorted(options.items())), tuple(extras))`. Adding an item with a matching signature increments the existing line's quantity and recalculates its line total.
+- **Atomic Stack Splitting (`target_quantity`):** When modifying a subset of stacked items (e.g., the user has two burgers in `line_1` and states *"put cheese on just one of them"*), `edit_item(line_id="line_1", target_quantity=1, add_extras=["cheese"])` validates the target configuration first, decrements `line_1` to `quantity=1`, and creates `line_2` with `quantity=1` and `extras=["cheese"]`.
+- **Auto-Consolidation (`_consolidate_lines`):** If modifying `line_2` makes its customizations identical to `line_1`, the cart merges them back into a single line.
+- **Atomic Rollback Guarantee:** Before mutating any line, candidate options and extras are validated against `MenuCatalog`. If validation fails, the cart remains untouched.
+- **Persistent Special Instructions:** `update_special_instructions()` accumulates dietary and kitchen notes across turns (separated by `; `) and passes them to `submit_order` at checkout.
+- **Budget Tracking:** Dynamically evaluates `total_price > 50.00`, exposing `exceeds_limit = True` to the agent and HUD.
+
+---
+
+## 4. LLM & Speech Routing Layer (`src/clients/` & `server/`)
+
+### Environment-Driven Model Router (`router.py`)
+
+`src/clients/router.py` acts as an abstract factory routing LLM and Speech operations based on `.env` variables (`LLM_PROVIDER` and `SPEECH_PROVIDER`):
+
+| Subsystem | `.env` Variable | Local Option (`llama-server` / `speech_service`) | Cloud API Option (`mistral`) |
+| :--- | :--- | :--- | :--- |
+| **LLM Reasoning** | `LLM_PROVIDER` | `LlamaClient` (`src/clients/llama_client.py`) | `MistralClient` (`src/clients/mistral_client.py`) |
+| **Voice STT / TTS** | `SPEECH_PROVIDER` | `SpeechServiceClient` (`server/speech.py`) | `MistralSpeechClient` (`server/mistral_speech.py`) |
+
+When local GPU services are active (`any_service_uses_vram() == True`), `server/app.py` runs an automatic **VRAM Lifecycle Watchdog**:
+- Pre-warms STT, TTS, and the static system prompt KV cache on `/api/session/start`.
+- Runs a background loop that offloads models from GPU memory after 15 minutes of inactivity or 5 seconds after the last browser session disconnects (`/api/session/close`).
+
+### Local LLM Backend: `llama.cpp` (`llama-server`) with Qwen 3.6 35B
+
+The local inference engine runs on `llama-server` hosting **Qwen 3.6 35B (A3B)** with prompt caching pinned to slot `0`, flash attention enabled, and reasoning tags disabled.
+
+#### Systemd Service Unit File (`/etc/systemd/system/llama-server.service`):
+
+```ini
+[Unit]
+Description=Llama.cpp Dynamic Router Server
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/llama.cpp
+Environment="CUDA_VISIBLE_DEVICES=0"
+Environment="CUDA_MODULE_LOADING=EAGER"
+ExecStart=/opt/llama.cpp/build/bin/llama-server \
+  --models-dir /opt/models \
+  --models-autoload \
+  --models-max 1 \
+  --host 0.0.0.0 \
+  --port 8080 \
+  -np 1 \
+  -c 16384 \
+  -fa on \
+  --no-warmup \
+  --cache-prompt \
+  --cache-reuse 256 \
+  --fit on \
+  --fit-target 3072 \
+  --jinja \
+  -b 2048 \
+  -ub 1024 \
+  --poll 0 \
+  --poll-batch 0 \
+  --reasoning off \
+  --no-mmproj
+
+Restart=always
+RestartSec=5
+LimitMEMLOCK=infinity
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
+```
+
+### Cloud LLM & Voice Backend: Mistral AI API
+
+When `LLM_PROVIDER=mistral`, `MistralClient` communicates with Mistral's Chat Completions API (`ministral-14b-2512`). When `SPEECH_PROVIDER=mistral`, `MistralSpeechClient` supports both Realtime WebSocket streaming (`/v1/audio/transcriptions/realtime`) and batch REST transcription (`/v1/audio/transcriptions`), and synthesizes speech using `/v1/audio/speech`.
+
+### Resilience & Exponential Backoff Retry Engine (`errors.py`)
+
+All HTTP network requests pass through `request_with_retry_sync` and `request_with_retry_async`, providing:
+- Full jitter exponential backoff on transient errors (`408`, `429`, `500`, `502`, `503`, `504`) and network timeouts, honoring `Retry-After` headers.
+- Mapping into domain exceptions: `BadRequestError` (400/422), `AuthenticationError` (401/403), `EndpointOrModelNotFoundError` (404), `RateLimitError` (429), and `UpstreamServerError` (5xx).
+
+---
+
+## 5. MCP Client & Specification Rejection Handling (`src/mcp/client.py`)
+
+`MCPOrderClient` connects to the Moveo Streamable HTTP MCP server (`https://webviews-git-moveo-food-nlp-assignment-moveo-ai.vercel.app/api/demo/mcp`) using the official `mcp` SDK (`streamablehttp_client` + `ClientSession`), backed by a fallback `httpx` JSON-RPC implementation.
+
+### Authentication & Failure Injection
+
+- **Authentication Header:** Injects `"X-Applicant-Email": "nickpanosrigas@gmail.com"` on every request.
+- **Failure Injection Testing (`force_failure`):**
+  - `kitchen_busy`: Injects HTTP header `X-Demo-Force-Failure: kitchen_busy` (MCP returns `success: false` with a retryable message).
+  - `server_error`: Injects HTTP header `X-Demo-Force-Failure: server_error` (MCP returns `isError: true` with a `success: false` body).
+  - `schema_error`: Modifies the outbound payload's first item quantity to `0` to trigger a genuine JSON-RPC `-32602` error.
+  - `business_refusal`: Inflates the outbound quantity to exceed the `$50.00` restaurant limit.
+
+### Handling All Three Specification Rejection Paths
+
+Per the assignment specification, `_parse_mcp_sdk_result()` **checks `isError` before reading `structuredContent`**:
+
+1. **Schema Validation (`isError: true`, JSON-RPC `-32602`):** No `structuredContent` exists on this path. The client extracts the text block, parses the `-32602` error code, and returns `{"success": False, "error": "Schema validation error (-32602): ..."}`.
+2. **Server Error / Transient Busy (`kitchen_busy`):** Extracts the error text and returns `{"success": False, "error": "..."}`. `FoodOrderAgent` marks `can_retry_submission = True` and prompts the user to retry.
+3. **Business Refusal (`isError: false`, `success: false`, e.g., `> $50.00` limit):** Reads `structuredContent` (or fallback text) and returns the refusal reason so the agent can help the user adjust their order.
+
+---
+
+## 6. Repository Structure
 
 ```text
 moveo-food-agent/
-├── agent.py                     # Required root export: `from agent import FoodOrderAgent`
-├── main.py                      # Required interactive CLI entry point: `python main.py`
-├── menu.yaml                    # Canonical restaurant menu schema (burgers, pizzas, sides, drinks)
-├── pyproject.toml               # Python 3.13+ project metadata & dependencies (managed via `uv`)
-├── Dockerfile                   # Production container definition for the FastAPI backend
-├── docker-compose.yml           # Orchestrates backend & web containers with host port bindings
-├── .env                         # Environment configuration (ports, URLs, credentials)
-├── README.md                    # Backend architecture, setup, and design documentation
+├── .env                            # Local environment secrets and provider configuration
+├── .env.example                    # Environment variable template blueprint
+├── Dockerfile                      # Multi-stage production container build for backend
+├── docker-compose.yml              # Multi-container orchestration (backend + web services)
+├── agent.py                        # Programmatic API entry point exporting FoodOrderAgent
+├── main.py                         # Interactive terminal CLI entry point
+├── menu.yaml                       # Restaurant catalog schema: items, prices, options, extras
+├── requirements.txt                # Production Python dependencies
 │
 ├── config/
-│   ├── __init__.py
-│   └── settings.py              # Centralized, immutable `.env` loader & path resolver
-│
-├── src/
-│   ├── __init__.py
-│   ├── core/
-│   │   ├── agent_loop.py        # `FoodOrderAgent` state machine, tool router & confirmation guardrails
-│   │   ├── menu.py              # Pydantic `menu.yaml` parser, validator, Decimal calculator & schema builder
-│   │   ├── cart.py              # Stateful `OrderCart` engine with line signatures & Split/Merge logic
-│   │   ├── ollama_client.py     # Persistent HTTP Ollama client with KV-cache warmup & VRAM offloading
-│   │   └── prompts.py           # Static prefix system prompt & dynamic JSON-Schema tool declarations
-│   ├── mcp/
-│   │   └── client.py            # Async/Sync MCP Streamable HTTP client with 3-tier error normalization
-│   └── utils/
-│       └── logger.py            # Unified console formatter & JSONL structured turn logger (`TurnLogger`)
+│   └── settings.py                 # Centralized Pydantic application settings loader
+├── logs/                           # Directory storing structured conversation_turns.jsonl files
+├── web/                            # React 19 Voice Web UI (see web/README.md for frontend internals)
 │
 ├── server/
-│   ├── app.py                   # FastAPI NDJSON streaming server & 15-minute session/VRAM watchdog
-│   └── speech.py                # Async client for hardware-accelerated STT (Whisper) & TTS (Kokoro)
+│   ├── app.py                      # FastAPI streaming endpoints, session manager & VRAM watchdog
+│   ├── speech.py                   # Local GPU Speech Service client (Faster-Whisper + Kokoro-82M)
+│   └── mistral_speech.py           # Mistral Cloud Speech client (Realtime WebSocket/REST STT + TTS)
 │
-└── logs/
-    └── conversation_turns.jsonl # Structured turn-by-turn audit logs generated at runtime
+├── src/
+│   ├── clients/
+│   │   ├── router.py               # Master factory routing LLM & Speech calls based on .env
+│   │   ├── llama_client.py         # Local llama-server client (Qwen 3.6 35B) with KV caching
+│   │   ├── mistral_client.py       # Mistral Chat Completions API client
+│   │   └── errors.py               # HTTP error mapping & exponential backoff engine
+│   │
+│   ├── core/
+│   │   ├── agent_loop.py           # FoodOrderAgent state machine, tool loop & guardrails
+│   │   ├── cart.py                 # OrderCart engine (auto-merge, stack splitting, Decimal math)
+│   │   ├── menu.py                 # MenuCatalog parser, validator & dynamic tool schemas
+│   │   └── prompts.py              # Static system prompt & dynamic user context injection
+│   │
+│   ├── mcp/
+│   │   └── client.py               # Streamable HTTP MCP client for submit_order
+│   │
+│   └── utils/
+│       └── logger.py               # Application logging formatter & TurnLogger JSONL recorder
+│
+└── tests/
+    ├── test_menu.py                # Unit tests for menu parsing, defaults & decimal pricing
+    ├── test_cart.py                # Unit tests for cart auto-merge, splitting, rollback & budget
+    ├── test_mcp.py                 # Unit tests for MCP headers, failure injection & rejections
+    ├── test_agent_loop.py          # Unit tests for confirmation guardrails & tool contracts
+    ├── test_conversations_easy.py  # E2E Evaluation Suite: Scenarios 1–5 (Standard ordering)
+    ├── test_conversations_medium.py# E2E Evaluation Suite: Scenarios 6–15 (Omissions & edits)
+    └── test_conversations_hard.py  # E2E Evaluation Suite: Scenarios 16–25 (Stress & 15-turn chaos)
 ```
-
-*(Note: The `/web` frontend application and `/speech_service` GPU container maintain their own dedicated `README.md` files inside their respective directories.)*
 
 ---
 
-## 3. Setup & Installation
+## 7. Environment Configuration (`.env`)
 
-### Prerequisites
-* **Python:** `3.13+`
-* **Package Manager:** [`uv`](https://docs.astral.sh/uv/) (or standard `pip`)
-* **LLM Backend:** An active **Ollama** instance serving `gemma4:12b`
-* **Speech Service *(Optional — required only for Voice endpoints in `server/app.py`)*:** Running instance of `speech_service`
+Create your `.env` file in the root directory:
 
-### 1. Install Dependencies
 ```bash
-# Clone the repository
-git clone <your-repo-url>
-cd moveo-food-agent
-
-# Install dependencies into an isolated virtual environment using uv
-uv sync
+cp .env.example .env
 ```
 
-### 2. Configure Environment Variables (`.env`)
-Create a `.env` file in the root directory:
+Ensure the following configuration is set:
 
 ```env
 # -------------------------------------------------------------------
-# Network & Port Bindings (Docker / Reverse Proxy)
+# Container Port Bindings
 # -------------------------------------------------------------------
-WEB_EXTERNAL_PORT=3000
+WEB_EXTERNAL_PORT=3005
 WEB_INTERNAL_PORT=3000
-BACKEND_EXTERNAL_PORT=8000
+
+BACKEND_EXTERNAL_PORT=8005
 BACKEND_INTERNAL_PORT=8000
 
 # -------------------------------------------------------------------
-# LLM Backend (Ollama)
+# Service Providers ("mistral" | "llama-server" and "mistral" | "speech_service")
 # -------------------------------------------------------------------
-OLLAMA_URL=[http://192.168.1.220:11434](http://192.168.1.220:11434)
-OLLAMA_MODEL=gemma4:12b
-OLLAMA_CTX=32000
+LLM_PROVIDER=llama-server
+SPEECH_PROVIDER=speech_service
 
 # -------------------------------------------------------------------
-# Moveo MCP Server & Applicant Identification
+# Mistral API Configuration (Required if LLM_PROVIDER=mistral or SPEECH_PROVIDER=mistral)
 # -------------------------------------------------------------------
-APPLICANT_EMAIL=your_email_from_cv@example.com
-MCP_SERVER_URL=[https://webviews-git-moveo-food-nlp-assignment-moveo-ai.vercel.app/api/demo/mcp](https://webviews-git-moveo-food-nlp-assignment-moveo-ai.vercel.app/api/demo/mcp)
+MISTRAL_API_KEY=your_mistral_api_key_here
+MISTRAL_LLM=ministral-14b-2512
+MISTRAL_STT=voxtral-mini-transcribe-realtime-3
+MISTRAL_TTS=voxtral-mini-tts-3-0
 
 # -------------------------------------------------------------------
-# Speech Service (Faster-Whisper STT + Kokoro-82M TTS)
+# Local Llama-Server Configuration (Required if LLM_PROVIDER=llama-server)
 # -------------------------------------------------------------------
-SPEECH_URL=http://localhost:8000
+LLAMA_URL=https://llama.pali.autos
+LLAMA_MODEL=Qwen3.6-35B-A3B
+LLAMA_CTX=16384
+
+# -------------------------------------------------------------------
+# Local Speech Service Configuration (Required if SPEECH_PROVIDER=speech_service)
+# -------------------------------------------------------------------
+SPEECH_SERVICE_URL=https://speech.pali.autos
+
+# -------------------------------------------------------------------
+# Moveo MCP Server
+# -------------------------------------------------------------------
+APPLICANT_EMAIL=nickpanosrigas@gmail.com
+MCP_SERVER_URL=https://webviews-git-moveo-food-nlp-assignment-moveo-ai.vercel.app/api/demo/mcp
 ```
-
-> **Important:** Ensure `APPLICANT_EMAIL` matches the email address on your CV. Every request to Moveo's MCP server automatically attaches this value via the `X-Applicant-Email` HTTP header.
 
 ---
 
-## 4. Usage & Entry Points
+## 8. Running the Application (CLI, Backend & Web UI)
 
-### 1. Interactive CLI Mode
-Run the agent directly in your terminal. On startup, `main.py` automatically pre-loads `gemma4:12b` into GPU VRAM and evaluates the static system prompt and tool schemas into Ollama's KV cache. When you exit (`quit`, `exit`, `Ctrl+C`, or `SIGTERM`), it automatically offloads the model from VRAM (`keep_alive=0`).
+### Prerequisites
+
+- **Python:** `3.13+`
+- **Node.js:** `20+` or `22+` (only needed if running the Web UI outside of Docker)
 
 ```bash
-uv run main.py
+# Create and activate virtual environment
+python3.13 -m venv .venv
+source .venv/bin/activate
+
+# Install Python dependencies
+pip install -r requirements.txt
 ```
 
-### 2. Programmatic Python API
-Import `FoodOrderAgent` directly from the root `agent.py` module as required by the specification:
+### 1. Interactive CLI (`main.py`)
+
+Run an interactive terminal ordering session directly from the root directory:
+
+```bash
+python main.py
+```
+
+### 2. Programmatic Python API (`agent.py`)
+
+Use `FoodOrderAgent` directly in Python scripts or automated testing harnesses:
 
 ```python
 from agent import FoodOrderAgent
 
 agent = FoodOrderAgent()
 
-# Turn 1: Add item (local cart mutation -> no exposed `tool_calls` key)
-r1 = agent.send("I want a large burger with cheese")
-# -> {"message": "I've added a Large Classic Burger with cheese for $11.50. Anything else?"}
+# 1. Add item with customization
+res1 = agent.send("I want a large classic burger with cheese")
+print(res1["message"])
+# -> "Large Classic Burger with cheese. Anything else?"
 
-# Turn 2: Modify item (local cart mutation -> no exposed `tool_calls` key)
-r2 = agent.send("Actually make it regular")
-# -> {"message": "Updated to a Regular Classic Burger with cheese for $9.50. Anything else?"}
+# 2. Modify an item in the cart
+res2 = agent.send("Actually make it regular")
+print(res2["message"])
+# -> "Updated: Regular Classic Burger with cheese. Anything else?"
 
-# Turn 3: Request checkout (triggers confirmation summary before MCP submission)
-r3 = agent.send("Submit")
-# -> {"message": "Your order is one Regular Classic Burger with cheese for a total of $9.50. Ready to submit?"}
+# 3. Request submission (triggers two-step confirmation summary)
+res3 = agent.send("Submit")
+print(res3["message"])
+# -> "Your order: Regular Classic Burger with cheese — $9.50. Ready to submit?"
 
-# Turn 4: Confirm submission (invokes remote MCP `submit_order` tool)
-r4 = agent.send("Yes")
-# -> {
-#      "message": "Order submitted! Order #ORD-12345. Estimated time: 15-20 minutes.",
-#      "tool_calls": [
-#        {
-#          "name": "submit_order",
-#          "arguments": {
-#            "items": [{"item_id": "classic_burger", "quantity": 1, "options": {"size": "regular", "patty": "beef"}, "extras": ["cheese"]}],
-#            "special_instructions": null
-#          },
-#          "result": {"success": true, "order_id": "ORD-12345", "total": 9.5, "estimated_time": "15-20 minutes"}
-#        }
-#      ]
-#    }
+# 4. Confirm submission (calls MCP submit_order tool)
+res4 = agent.send("Yes")
+print(res4["message"])
+# -> "Order submitted! Order #ORD-12345. Estimated time: 15-20 minutes."
+print(res4.get("tool_calls"))
+# -> [{'name': 'submit_order', 'arguments': {...}, 'result': {'success': True, ...}}]
 ```
 
-### 3. FastAPI Streaming Server
-Launch the FastAPI backend for the Web/Voice UI:
+### 3. FastAPI Streaming Backend Server (`server/app.py`)
+
+Launch the backend streaming server locally on port `8000`:
 
 ```bash
-uv run uvicorn server.app:app --host 0.0.0.0 --port 8000
+uvicorn server.app:app --host 0.0.0.0 --port 8000
 ```
 
-### 4. Docker Deployment
+### 4. React Voice & Web UI (Launched from the Root Directory)
+
+To run the interactive React frontend in development mode, install and start it directly from the root repository directory (do not `cd web`):
+
 ```bash
+# Install frontend dependencies from root
+npm --prefix web install
+
+# Start Vite dev server on http://localhost:3000 (proxies /api to localhost:8000)
+npm --prefix web run dev
+```
+
+*(For architectural details on the 5-state Voice Orb canvas, Web Audio FIFO queuing, and thermal receipt HUD, refer to `web/README.md`.)*
+
+---
+
+## 9. Docker & Docker Compose Deployment
+
+The entire stack is containerized using `Dockerfile` (FastAPI backend) and `web/Dockerfile` (React frontend static server), orchestrated via `docker-compose.yml`.
+
+### Port Bindings (Defined in `.env`):
+- **Web UI:** `http://localhost:3005` (mapped to internal container port `3000`)
+- **FastAPI Backend:** `http://localhost:8005` (mapped to internal container port `8000`)
+
+### Build and Run Containers:
+
+```bash
+# Build and start all services in detached mode
 docker compose up -d --build
+
+# View real-time container logs
+docker compose logs -f
+
+# Stop and remove containers
+docker compose down
 ```
 
 ---
 
-## 5. Core Engineering & Design Decisions
+## 10. Test Suites & Verification (`tests/`)
 
-### 1. Pure-Python Agentic Loop & Prefix KV-Caching
-Instead of relying on LangGraph, `src/core/agent_loop.py` implements a bounded, deterministic `for step in range(self.max_steps)` state machine (`max_steps = 6`).
-* **Prefix KV-Cache Optimization:** A common mistake in stateful agents is injecting the changing cart state directly into the top `system` prompt on every turn. Doing so invalidates the LLM's KV cache on every message, forcing full re-evaluation of the system instructions and tool definitions (~1,400+ tokens).
-* **Our Solution:** `self.history[0]` (`role: "system"`) and `self.tools` are **100% static and immutable** across the entire session (`build_static_system_prompt()`). The live cart snapshot and confirmation flags are injected into the user turn wrapper (`[LIVE CART CONTEXT]...[/LIVE CART CONTEXT]`). Consequently, Ollama achieves a **100% prefix KV-cache hit** on every turn, and setting `"think": False` on `/api/chat` eliminates hidden reasoning latency prior to tool emission.
-* **No `list_items` Tool Needed:** Because the live cart state (including `line_id`s, options, extras, unit prices, and total price) is deterministically injected into every turn's context, the agent never wastes an extra LLM round-trip calling a `list_items` tool and never hallucinates arithmetic.
+Testing is separated into two tiers: **Instant Unit Tests** (zero external dependencies) and **End-to-End Conversational Evaluation Suites** (running against the active LLM backend).
 
-### 2. Internal vs. Exposed `tool_calls` Contract
-Per the assignment specification, `agent.send()` must only include the `"tool_calls"` key when the remote MCP `submit_order` tool is invoked (add/edit/remove turns return `{"message": "..."}`).
-* Internally, the LLM is equipped with five tools: `add_item`, `edit_item`, `remove_item`, `set_special_instructions`, and `submit_order`.
-* `agent_loop.py` routes the four cart management tools to the local Python `OrderCart` engine (`internal_tool_trace`, which is saved to the JSONL audit log for observability) while keeping them hidden from the returned `send()` dictionary.
-* Only `submit_order` executions are appended to `exposed_tool_calls` and returned in `response["tool_calls"]`.
+### 1. Instant Unit Tests (`pytest`)
 
-### 3. Two-Layer Menu Validation & Dynamic Schema Generation (`menu.py`)
-`src/core/menu.py` parses `menu.yaml` into strict Pydantic models (`MenuCatalog`, `MenuItem`, `OptionDefinition`, `ExtrasDefinition`) and enforces validity at two distinct layers:
-1. **Schema-Level (Pre-Inference):** `build_ollama_tools(menu)` dynamically inspects `menu.yaml` at startup to generate JSON Schema `enum` constraints for every `item_id`, option category, and extra ID.
-2. **Runtime Execution-Level (`validate_and_resolve`):**
-   * Rejects unknown `item_id`s or `quantity < 1`.
-   * Rejects cross-item option hallucinations (e.g., passing `patty` on `spicy_burger`) and automatically generates a **cross-item hint** (`"Invalid option ['patty'] for 'Spicy Jalapeño Burger'. Note: option 'patty' is only available on ['classic_burger']."`).
-   * Resolves default option values when omitted by the user (e.g., `size="regular"`, `patty="beef"`).
-   * Enforces required options that have **no default** (specifically `milkshake` -> `flavor`), returning an actionable error to the LLM so it prompts the user to pick a flavor (`vanilla`, `chocolate`, `strawberry`, or `oreo`).
-   * Deduplicates extras and sorts them in canonical menu order.
-   * Performs all unit and line price calculations using Python's `decimal.Decimal` (`ROUND_HALF_UP`) to prevent IEEE-754 floating-point drift.
+The four core unit tests verify `MenuCatalog` parsing, `OrderCart` state transitions, `MCPOrderClient` rejection normalization, and `FoodOrderAgent` confirmation guardrails using deterministic mocks. 
 
-### 4. Line-Based Cart Engine with Atomic "Split & Merge" (`cart.py`)
-`src/core/cart.py` manages the session's `OrderCart` using discrete `CartLineItem` objects (`line_1`, `line_2`, etc.). Each line computes a canonical identity `signature` tuple: `(item_id, sorted(options.items()), tuple(extras))`.
-* **Auto-Merge on Add & Edit:** If a user orders a Regular Classic Burger and later says *"Add another regular classic burger"*, `_merge_or_append()` detects the matching signature and increments `line_1.quantity` to `2` rather than creating duplicate lines. Similarly, if editing `line_2` makes it identical to `line_1`, `_consolidate_lines()` automatically merges them back into a single line.
-* **Partial Stack Split (`target_quantity < line.quantity`):** If `line_1` has `quantity=3` (e.g., 3 Spicy Burgers) and the user says *"Add bacon to just one of them"*, the LLM calls `edit_item(line_id="line_1", target_quantity=1, add_extras=["bacon"])`. `OrderCart` validates the new configuration first (for atomic rollback safety), decrements `line_1` to `quantity=2`, and splits the modified unit into `line_2` (`quantity=1` with `extras=["bacon"]`).
-* **Delta Extra Updates:** Rather than overwriting the entire `extras` array on edit (which risks accidentally erasing existing toppings when removing one), `edit_item` uses explicit delta parameters (`add_extras` and `remove_extras`).
+Run all four test suites together in a single command (**executes in under 1 second**):
 
-### 5. Streamable HTTP MCP Client & 3-Mode Failure Handling (`client.py`)
-`src/mcp/client.py` (`MCPOrderClient`) connects to Moveo's MCP server (`https://webviews-git-moveo-food-nlp-assignment-moveo-ai.vercel.app/api/demo/mcp`) using the Streamable HTTP transport and includes `X-Applicant-Email` on every request.
-* **Dual Transport Support:** Uses the official `mcp` Python SDK (`streamablehttp_client` + `ClientSession`) if installed, and includes a built-in, zero-dependency `httpx` JSON-RPC 2.0 Streamable HTTP implementation (handling `initialize`, `Mcp-Session-Id`, `notifications/initialized`, `tools/call`, and both `application/json` and `text/event-stream` SSE payloads).
-* **Event-Loop Safe:** Detects whether an `asyncio` loop is already running (e.g., inside FastAPI) and dispatches safely in both synchronous (`main.py`) and asynchronous (`server/app.py`) contexts.
-* **Complete Failure Path Coverage:**
-  1. **Schema Validation (`isError: true`, JSON-RPC `-32602`):** Checks `result.isError` *before* reading `structuredContent`, extracting the JSON-RPC error message cleanly.
-  2. **Transient Failures (`kitchen_busy` / `server_error`):** Supports the `X-Demo-Force-Failure` header. When a submission fails transiently, `agent_loop.py` sets `self.can_retry_submission = True` so if the user replies *"Yes"* to retry, the next turn immediately re-submits without repeating the confirmation prompt.
-  3. **Business Refusal (`>$50.00 limit`):** Reads `structuredContent` (or parses the JSON text block) when `success: false` is returned, allowing the agent to inform the user of the $50 limit and ask which item to remove.
-
-### 6. GPU VRAM Lifecycle & Session Watchdog (`app.py` & `speech.py`)
-Because local LLM (`gemma4:12b`) and speech models (`Faster-Whisper` + `Kokoro-82M`) consume significant GPU VRAM, `server/app.py` implements an automated `SessionManager`:
-* **Parallel Warmup on Connect:** When a user opens the web app (`/api/session/start`), `SessionManager` warms up Faster-Whisper, Kokoro-82M, and Ollama's 32k KV cache in parallel via `asyncio.gather` (with strict deduplication so React StrictMode double-mounts do not trigger duplicate loads).
-* **15-Minute Inactivity Watchdog:** Every request refreshes a 900-second keep-alive timer (`INACTIVITY_TIMEOUT_SECONDS = 900`). A background watchdog task checks every 30 seconds and unloads all models from VRAM if all sessions have been idle for 15 minutes.
-* **Tab-Close Offload (`5s` Grace Period):** When the browser tab closes (`POST /api/session/close`), `SessionManager` waits 5 seconds (to avoid thrashing VRAM on a simple browser refresh `F5`) and, if no active sessions remain, sends `keep_alive=0` to both Ollama and the Speech Service to free 100% of GPU memory.
+```bash
+pytest tests/test_menu.py tests/test_cart.py tests/test_mcp.py tests/test_agent_loop.py
+```
 
 ---
 
-## 6. Handled Edge Cases
+### 2. End-to-End Conversational Evaluation Suites (25 Scenarios)
 
-| # | Edge Case Scenario | How the Backend Handles It |
-| :- | :--- | :--- |
-| **1** | **The "Milkshake Trap" (Required option with `default: null`)** | Every menu item has defaults for required options except `milkshake` (`flavor` is `required: true` with no default). If a user orders *"a burger and a milkshake"*, `add_item` succeeds for the burger and returns a validation error for the milkshake, prompting the agent to ask for a flavor (`vanilla`, `chocolate`, `strawberry`, `oreo`). |
-| **2** | **Cross-Item Option & Extra Hallucinations** | If a user asks for a *"Veggie Spicy Burger"* or *"extra patty on a Spicy Burger"*, `MenuCatalog` catches that `patty` and `extra_patty` only exist on `classic_burger` and returns a cross-item hint so the LLM suggests the `classic_burger` or valid `spicy_burger` extras (`cheese`, `bacon`, `jalapeños`). |
-| **3** | **Partial Modification of Stacked Items** | Ordering *"3 spicy burgers"* and then saying *"add bacon to one of them"* uses `edit_item(..., target_quantity=1, add_extras=["bacon"])` to atomically split the line into `2x Regular Spicy Burger` and `1x Regular Spicy Burger with bacon`. |
-| **4** | **Two-Phase Confirmation Guardrail** | In `agent_loop.py`, if the LLM tries to call `submit_order` before the user has been shown the final summary and total price (`was_ready_to_submit == False`), the loop intercepts the call, returns `CONFIRMATION_REQUIRED_FIRST` to the model, and forces it to summarize the order and ask *"Ready to submit?"* first. |
-| **5** | **Post-Confirmation "Cold Feet" (`"Yes, and add a cola"`)** | If the agent asks *"Ready to submit?"* and the user replies *"Yes, and add a cola"*, `self.cart.modified_in_current_turn` flips to `True`. The loop blocks `submit_order` for that turn, adds the cola, announces the new total, and asks for confirmation again. |
-| **6** | **Duplicate `submit_order` Calls in a Single Turn** | `submitted_in_this_turn` guarantees that even if an LLM emits two tool calls in the same turn, `submit_order` only executes once against the MCP server. |
-| **7** | **Persistent `special_instructions` Aggregation** | Dietary notes mentioned on Turn 1 (*"no onions please"*) are stored deterministically in `OrderCart.special_instructions` and automatically attached to the final `submit_order` MCP payload on Turn N. |
-| **8** | **Over-$50 Orders & Live MCP Failure Testing** | Orders exceeding $50.00 are allowed to reach `submit_order` so the MCP server's business refusal (`success: false`) is captured in `tool_calls` and explained to the user. Additionally, passing `force_failure` (`kitchen_busy`, `server_error`, `schema_error`, `business_refusal`) allows one-click testing of all MCP error paths. |
+The three conversational evaluation suites execute 25 multi-turn dialogues against your active LLM backend (`llama-server` or Mistral).
 
----
+> **Note:** Ensure your LLM backend is running and reachable via the settings in `.env` before starting these tests. They run as standalone Python scripts (without `pytest`) and automatically warm up and clear the model cache upon completion.
 
-## 7. FastAPI NDJSON Streaming Protocol
+#### Evaluation Grading Scale:
+- **FULL PASS (`✓`):** Final submitted order payload **and** all intermediate turn tool calls match expected behavior.
+- **PARTIAL PASS (`~`):** Final submitted order payload is 100% accurate, but an intermediate turn took an alternate valid tool path.
+- **FAIL (`x`):** Final submitted order payload does not match expected items, options, extras, or instructions.
 
-`server/app.py` exposes streaming endpoints returning `application/x-ndjson` (Newline-Delimited JSON) so the client can synchronize text rendering and audio playback sentence-by-sentence.
+#### Run Each Suite Independently:
 
-### Endpoints
+- **Easy Suite (Scenarios 1–5 · Runtime: ~1.5 minutes):**  
+  Tests exact menu phrasing, single customized items, standard multi-category combos, pizzas, sides, and single-turn multi-item orders.
+  ```bash
+  python tests/test_conversations_easy.py
+  ```
 
-| Method | Endpoint | Description |
-| :--- | :--- | :--- |
-| `POST` | `/api/session/start` | Initializes session `FoodOrderAgent` and warms up Whisper, Kokoro, and Ollama KV cache. |
-| `POST` | `/api/session/close` | Closes session; offloads GPU VRAM (`keep_alive=0`) after a 5s grace period if no tabs remain. |
-| `POST` | `/api/session/reset` | Resets conversation history and clears the cart for a fresh order without unloading VRAM. |
-| `POST` | `/api/chat/text` | Accepts JSON `{session_id, message, force_failure}` and streams NDJSON turn events. |
-| `POST` | `/api/chat/voice` | Accepts `multipart/form-data` (`file`, `session_id`, `force_failure`), transcribes via Whisper, and streams NDJSON turn events. |
+- **Medium Suite (Scenarios 6–15 · Runtime: ~4 minutes):**  
+  Tests user mistakes, omissions, the "Milkshake Trap" (missing required flavor), item category swaps, option upgrades, extra delta removals, partial stack splitting (`target_quantity`), quantity decrements, generic burger disambiguation, and special instruction persistence across turns.
+  ```bash
+  python tests/test_conversations_medium.py
+  ```
 
-### NDJSON Stream Event Sequence
-
-1. **`transcription`** *(Emitted first on `/api/chat/voice` only, immediately after Faster-Whisper finishes)*:
-   ```json
-   {"type": "transcription", "text": "I want a large classic burger with bacon"}
-   ```
-2. **`turn_metadata`** *(Emitted immediately after `agent.send()` completes tool calls)*:
-   ```json
-   {
-     "type": "turn_metadata",
-     "full_message": "I've added a Large Classic Burger with bacon for $12.00. Anything else?",
-     "tool_calls": [],
-     "cart_state": {
-       "lines": [
-         {
-           "line_id": "line_1",
-           "item_id": "classic_burger",
-           "name": "Classic Burger",
-           "quantity": 1,
-           "options": {"size": "large", "patty": "beef"},
-           "extras": ["bacon"],
-           "unit_price": 12.0,
-           "line_total": 12.0
-         }
-       ],
-       "total_item_count": 1,
-       "total_price": 12.0,
-       "exceeds_50_limit": false,
-       "special_instructions": null,
-       "is_submitted": false,
-       "last_submitted_order_id": null,
-       "modified_in_current_turn": true
-     },
-     "turn_log": { "...structured turn log..." },
-     "mcp_payload": null
-   }
-   ```
-3. **`agent_chunk`** *(Emitted 1..N times as `SpeechServiceClient.synthesize_stream()` splits the response into sentences and synthesizes 24kHz WAV audio via Kokoro-82M)*:
-   ```json
-   {
-     "type": "agent_chunk",
-     "chunk_index": 0,
-     "total_chunks": 2,
-     "is_final": false,
-     "text_chunk": "I've added a Large Classic Burger with bacon for $12.00.",
-     "audio_b64": "UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=",
-     "sample_rate": 24000
-   }
-   ```
-4. **`turn_complete`** *(Signals end of stream)*:
-   ```json
-   {"type": "turn_complete"}
-   ```
+- **Hard Suite (Scenarios 16–25 · Runtime: ~6 minutes):**  
+  Tests complex conversational challenges: topping migrations, allergen instructions, pronoun ambiguity (*"make both of them large"*), the `$50.00` budget limit gauntlet, a 15-turn state-reconciliation stress test, auto-merge signature collapsing, zero/negative quantity attacks, mid-session cart wipes, and `kitchen_busy` transient failure recovery with mid-retry edits.
+  ```bash
+  python tests/test_conversations_hard.py
+  ```
 
 ---
 
-## 8. Structured Logging & Observability
+## 11. Structured Turn Logging (`src/utils/logger.py`)
 
-Requirement #5 is satisfied via `src/utils/logger.py`, which provides two layers of observability:
+Every dialogue turn is recorded by `TurnLogger` into newline-delimited JSON (`logs/conversation_turns.jsonl` for CLI/API, or `logs/session_<id>.jsonl` for web sessions):
 
-1. **Unified Console Telemetry (`setup_logging`):**
-   Standardizes log formatting across `main.py`, `server/app.py`, and Uvicorn while silencing noisy low-level `httpx`/`httpcore` traces. Every LLM call, local tool invocation, argument payload, cart total update, and MCP transaction is logged clearly:
-   ```text
-   2026-11-02 19:30:10 [INFO] [src.core.ollama_client]: [Ollama] Calling gemma4:12b (ctx=32000)...
-   2026-11-02 19:30:11 [INFO] [src.core.agent_loop]: [TOOL CALL] add_item | Args: {"item_id": "classic_burger", "quantity": 1, "options": {"size": "large"}, "extras": ["cheese"]}
-   2026-11-02 19:30:11 [INFO] [src.core.agent_loop]: [TOOL RESULT] add_item -> success=True | Action: added_or_merged | Cart Total: $11.50
-   ```
-
-2. **Structured JSONL Turn Logs (`TurnLogger` -> `logs/conversation_turns.jsonl`):**
-   Every completed turn appends a structured JSON record to disk (and to an in-memory ring buffer for the UI debug console) capturing the user message, agent response, exposed MCP `tool_calls`, internal cart tool traces (`internal_cart_actions`), and the resulting `cart_state` snapshot:
-   ```json
-   {
-     "timestamp": "2026-11-02T19:30:12.410284+00:00",
-     "session_id": "sess_a8f91c2b",
-     "turn_id": 1,
-     "user_message": "I want a large classic burger with cheese",
-     "agent_message": "I've added a Large Classic Burger with cheese for $11.50. Anything else?",
-     "tool_calls": [],
-     "internal_cart_actions": [
-       {
-         "name": "add_item",
-         "arguments": {"item_id": "classic_burger", "quantity": 1, "options": {"size": "large"}, "extras": ["cheese"]},
-         "result": {"success": true, "action": "added_or_merged", "line": {"line_id": "line_1", "unit_price": 11.5, "line_total": 11.5}}
-       }
-     ],
-     "cart_state": {
-       "lines": [{"line_id": "line_1", "item_id": "classic_burger", "name": "Classic Burger", "quantity": 1, "options": {"size": "large", "patty": "beef"}, "extras": ["cheese"], "unit_price": 11.5, "line_total": 11.5}],
-       "total_item_count": 1,
-       "total_price": 11.5,
-       "exceeds_50_limit": false,
-       "special_instructions": null,
-       "is_submitted": false
-     },
-     "metadata": {"model": "gemma4:12b", "num_ctx": 32000}
-   }
-   ```
+```json
+{
+  "timestamp": "2026-09-15T14:22:10.412891+00:00",
+  "session_id": "sess_a8f91c02",
+  "turn_id": 1,
+  "user_message": "I'd like a large classic burger with cheese and bacon.",
+  "agent_message": "Added a Large Classic Burger with cheese and bacon ($13.00). Anything else?",
+  "tool_calls": [],
+  "internal_cart_actions": [
+    {
+      "name": "add_item",
+      "arguments": {
+        "item_id": "classic_burger",
+        "quantity": 1,
+        "options": {
+          "size": "large"
+        },
+        "extras": [
+          "cheese",
+          "bacon"
+        ]
+      },
+      "result": {
+        "success": true,
+        "action": "added_or_merged"
+      }
+    }
+  ],
+  "cart_state": {
+    "lines": [
+      {
+        "line_id": "line_1",
+        "item_id": "classic_burger",
+        "name": "Classic Burger",
+        "quantity": 1,
+        "options": {
+          "size": "large",
+          "patty": "beef"
+        },
+        "extras": [
+          "cheese",
+          "bacon"
+        ],
+        "unit_price": 13.0,
+        "line_total": 13.0
+      }
+    ],
+    "total_item_count": 1,
+    "total_price": 13.0,
+    "exceeds_50_limit": false,
+    "special_instructions": null,
+    "is_submitted": false
+  },
+  "metadata": {
+    "llm_provider": "llama-server",
+    "model": "Qwen3.6-35B-A3B",
+    "num_ctx": 16384
+  }
+}
+```
