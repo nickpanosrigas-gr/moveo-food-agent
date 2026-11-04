@@ -17,26 +17,26 @@ SpeechProviderType = Literal["mistral", "speech_service"]
 @dataclass(frozen=True)
 class Settings:
     # Provider Selectors (Default to mistral)
-    LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "mistral").strip().lower()
-    SPEECH_PROVIDER: str = os.getenv("SPEECH_PROVIDER", "mistral").strip().lower()
+    LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "llama-server").strip().lower()
+    SPEECH_PROVIDER: str = os.getenv("SPEECH_PROVIDER", "speech_service").strip().lower()
 
     # Mistral Configuration
     MISTRAL_API_KEY: str = os.getenv("MISTRAL_API_KEY", "").strip()
     MISTRAL_API_URL: str = os.getenv("MISTRAL_API_URL", "https://api.mistral.ai").strip().rstrip("/")
-    MISTRAL_LLM: str = os.getenv("MISTRAL_LLM", "deepseek-v4-1-flash-1017").strip()
+    MISTRAL_LLM: str = os.getenv("MISTRAL_LLM", "ministral-14b-2512").strip()
     MISTRAL_STT: str = os.getenv("MISTRAL_STT", "voxtral-mini-transcribe-realtime-3").strip()
     MISTRAL_TTS: str = os.getenv("MISTRAL_TTS", "voxtral-mini-tts-3-0").strip()
 
     # Llama-Server Configuration (Required only when LLM_PROVIDER == "llama-server")
-    LLAMA_URL: str = os.getenv("LLAMA_URL", "").strip().rstrip("/")
+    LLAMA_URL: str = os.getenv("LLAMA_URL", "https://llama.pali.autos").strip().rstrip("/")
     LLAMA_MODEL: str = os.getenv("LLAMA_MODEL", "Qwen3.6-35B-A3B").strip()
     LLAMA_CTX: int = int(os.getenv("LLAMA_CTX", "16384") or "16384")
 
     # Local Speech Service Configuration (Required only when SPEECH_PROVIDER == "speech_service")
-    SPEECH_SERVICE_URL: str = os.getenv("SPEECH_SERVICE_URL", "").strip().rstrip("/")
+    SPEECH_SERVICE_URL: str = os.getenv("SPEECH_SERVICE_URL", "https://speech.pali.autos").strip().rstrip("/")
 
     # Moveo MCP Configuration
-    APPLICANT_EMAIL: str = os.getenv("APPLICANT_EMAIL", "").strip()
+    APPLICANT_EMAIL: str = os.getenv("APPLICANT_EMAIL", "nickpanosrigas@gmail.com").strip()
     MCP_SERVER_URL: str = os.getenv(
         "MCP_SERVER_URL",
         "https://webviews-git-moveo-food-nlp-assignment-moveo-ai.vercel.app/api/demo/mcp",
