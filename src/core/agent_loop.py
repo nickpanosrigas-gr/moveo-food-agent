@@ -8,9 +8,9 @@ from pathlib import Path
 from typing import Any
 
 from config.settings import settings
+from src.clients import LLMClientProtocol, create_llm_client, llm_uses_vram
 from src.core.cart import OrderCart
 from src.core.menu import MenuCatalog
-from src.core.llm_client import LLMClient
 from src.core.prompts import (
     build_llm_tools,
     build_static_system_prompt,
@@ -31,22 +31,25 @@ THINKING_STRIP_REGEX = re.compile(
     re.IGNORECASE,
 )
 
+
 def _sanitize_agent_text(text: str) -> str:
     """Removes any <think>...</think> blocks, stray </think> tags, and extra whitespace."""
     if not text:
         return ""
     cleaned = THINKING_STRIP_REGEX.sub("", text)
-    # Collapse multiple blank lines or spaces left behind
     cleaned = re.sub(r"\n\s*\n+", "\n", cleaned).strip()
     return cleaned
+
 
 class FoodOrderAgent:
     def __init__(
         self,
         menu_path: str | Path = settings.MENU_PATH,
+        llm_provider: str | None = None,
         llm_url: str | None = None,
         llm_model: str | None = None,
         llm_ctx: int | None = None,
+        llm_api_key: str | None = None,
         mcp_url: str | None = None,
         applicant_email: str | None = None,
         log_path: str | Path = settings.DEFAULT_LOG_PATH,
@@ -55,10 +58,12 @@ class FoodOrderAgent:
     ):
         self.menu = MenuCatalog.from_yaml(menu_path)
         self.cart = OrderCart(self.menu)
-        self.llm = LLMClient(
+        self.llm: LLMClientProtocol = create_llm_client(
+            provider=llm_provider,
             base_url=llm_url,
             model=llm_model,
             num_ctx=llm_ctx,
+            api_key=llm_api_key,
         )
         self.mcp_client = MCPOrderClient(
             server_url=mcp_url or settings.MCP_SERVER_URL,
@@ -80,7 +85,7 @@ class FoodOrderAgent:
         self.last_turn_log: dict[str, Any] | None = None
         self.last_mcp_payload: dict[str, Any] | None = None
 
-        if warmup_on_init:
+        if warmup_on_init and getattr(self.llm, "manages_vram", False):
             try:
                 self.llm.warmup_kv_cache_sync(self.static_system_prompt, self.tools)
             except Exception as exc:
@@ -91,7 +96,7 @@ class FoodOrderAgent:
 
     async def warmup_async(self) -> dict[str, Any]:
         return await self.llm.warmup_kv_cache(self.static_system_prompt, self.tools)
-    
+
     def unload_sync(self) -> dict[str, Any]:
         return self.llm.unload_model_sync()
 
@@ -116,7 +121,6 @@ class FoodOrderAgent:
         final_agent_text: str = ""
         submitted_in_this_turn: bool = False
 
-        # Track the last failed tool call signature: (fn_name, canonical_json_args)
         last_failed_call: tuple[str, str] | None = None
 
         for step in range(self.max_steps):
@@ -150,9 +154,7 @@ class FoodOrderAgent:
 
                 logger.info(f"[TOOL CALL] {fn_name} ({call_id}) | Args: {args_canonical}")
 
-                # -------------------------------------------------------------
                 # INTERCEPT DUPLICATE FAILED TOOL CALLS
-                # -------------------------------------------------------------
                 if last_failed_call is not None and call_signature == last_failed_call:
                     logger.warning(
                         f"[AGENT] Blocked duplicate failed tool call on step {step}: {fn_name} with {args_canonical}"
@@ -222,7 +224,7 @@ class FoodOrderAgent:
                         "cart": self.cart.get_state_snapshot(),
                     }
                     last_failed_call = None
-                    logger.info(f"[TOOL RESULT] set_special_instructions -> \"{self.cart.special_instructions}\"")
+                    logger.info(f'[TOOL RESULT] set_special_instructions -> "{self.cart.special_instructions}"')
                     internal_tool_trace.append(
                         {"name": fn_name, "arguments": fn_args, "result": tool_result}
                     )
@@ -367,10 +369,9 @@ class FoodOrderAgent:
                             "content": json.dumps(unknown_res, ensure_ascii=False),
                         }
                     )
-        
-        # Clean thinking tags from assistant output
+
         final_agent_text = _sanitize_agent_text(final_agent_text)
-        
+
         if not final_agent_text:
             final_agent_text = self._build_fallback_text(exposed_tool_calls)
 
@@ -380,9 +381,6 @@ class FoodOrderAgent:
             exposed_tool_calls=exposed_tool_calls,
         )
 
-        # -------------------------------------------------------------
-        # PRUNE CONSECUTIVE IDENTICAL FAILURES FROM HISTORY
-        # -------------------------------------------------------------
         self._prune_history_failures()
 
         self.last_turn_log = self.turn_logger.log_turn(
@@ -391,7 +389,11 @@ class FoodOrderAgent:
             exposed_tool_calls=exposed_tool_calls,
             internal_tool_calls=internal_tool_trace,
             cart_snapshot=self.cart.get_state_snapshot(),
-            extra_metadata={"model": self.llm.model, "num_ctx": self.llm.num_ctx},
+            extra_metadata={
+                "llm_provider": settings.LLM_PROVIDER,
+                "model": self.llm.model,
+                "num_ctx": getattr(self.llm, "num_ctx", None),
+            },
         )
 
         result_payload: dict[str, Any] = {"message": final_agent_text}
@@ -417,7 +419,7 @@ class FoodOrderAgent:
                 for c in calls
             ]
 
-        pruned: list[dict[str, Any]] = [self.history[0]]  # Keep system prompt
+        pruned: list[dict[str, Any]] = [self.history[0]]
         i = 1
 
         while i < len(self.history):
@@ -427,24 +429,20 @@ class FoodOrderAgent:
                 curr_calls = msg.get("tool_calls", [])
                 curr_sig = _calls_sig(curr_calls)
 
-                # Gather all tool responses corresponding to this assistant turn
                 tool_msgs: list[dict[str, Any]] = []
                 j = i + 1
                 while j < len(self.history) and self.history[j].get("role") == "tool":
                     tool_msgs.append(self.history[j])
                     j += 1
 
-                # Check if all tool responses in this cycle were failures
                 all_failed = len(tool_msgs) > 0 and all(
                     json.loads(tm.get("content", "{}")).get("success") is False
                     for tm in tool_msgs
                     if tm.get("content")
                 )
 
-                # Check if pruned already ends with the exact same failed assistant+tool cycle
                 is_duplicate = False
                 if all_failed and len(pruned) >= 2 and pruned[-1].get("role") == "tool":
-                    # Find previous assistant message in pruned
                     prev_asst_idx = None
                     for k in range(len(pruned) - 1, -1, -1):
                         if pruned[k].get("role") == "assistant":
@@ -512,6 +510,5 @@ class FoodOrderAgent:
 
         if self.cart.lines:
             return f"Your current total is ${self.cart.total_price:.2f}. Anything else?"
-            
+
         return "I didn't quite catch that. Could you repeat what you'd like to order?"
-    

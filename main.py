@@ -6,6 +6,7 @@ import signal
 import sys
 
 from agent import FoodOrderAgent
+from config.settings import settings
 from src.utils.logger import setup_logging
 
 # Initialize unified logging
@@ -16,16 +17,18 @@ def main() -> None:
     agent = FoodOrderAgent(warmup_on_init=True)
     unloaded = False
 
-    def _cleanup_vram(*_args) -> None:
+    def _cleanup_resources(*_args) -> None:
         nonlocal unloaded
         if not unloaded:
             unloaded = True
             agent.unload_sync()
 
-    signal.signal(signal.SIGTERM, lambda *_a: (_cleanup_vram(), sys.exit(0)))
+    signal.signal(signal.SIGTERM, lambda *_a: (_cleanup_resources(), sys.exit(0)))
 
     print("====================================================")
     print("  Moveo AI Food Ordering Agent (Interactive Mode)")
+    print(f"  Backend: LLM={settings.LLM_PROVIDER} ({agent.llm.model})")
+    print(f"           Speech={settings.SPEECH_PROVIDER}")
     print("  Type 'quit' or 'exit' to stop.")
     print("====================================================\n")
 
@@ -54,7 +57,7 @@ def main() -> None:
             except Exception as exc:
                 print(f"\n[Error]: {exc}\n")
     finally:
-        _cleanup_vram()
+        _cleanup_resources()
         print("Goodbye!")
 
 

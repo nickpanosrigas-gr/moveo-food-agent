@@ -7,6 +7,8 @@ import type {
   MCPPayload,
   FailureMode,
   NDJSONEvent,
+  LLMProvider,
+  SpeechProvider,
 } from '../types';
 import { useAudioPlayer, type AgentChunkEvent } from './useAudioPlayer';
 
@@ -16,6 +18,8 @@ interface UseAgentStreamOptions {
 }
 
 export interface UseAgentStreamReturn {
+  llmProvider: LLMProvider;
+  speechProvider: SpeechProvider;
   orbState: OrbState;
   setOrbState: (state: OrbState) => void;
   setMicReady: (ready: boolean) => void;
@@ -47,12 +51,40 @@ const INITIAL_CART_STATE: CartState = {
 };
 
 const GREETING_TEXT = 'Hello, what do you want to eat today?';
-const GREETING_AUDIO_URL = '/audio/greeting.wav';
+
+function getInitialProviders(): { llm: LLMProvider; speech: SpeechProvider } {
+  const envLLM = (
+    import.meta.env.LLM_PROVIDER ||
+    import.meta.env.VITE_LLM_PROVIDER ||
+    'mistral'
+  )
+    .toString()
+    .trim()
+    .toLowerCase();
+
+  const envSpeech = (
+    import.meta.env.SPEECH_PROVIDER ||
+    import.meta.env.VITE_SPEECH_PROVIDER ||
+    'mistral'
+  )
+    .toString()
+    .trim()
+    .toLowerCase();
+
+  return {
+    llm: envLLM === 'llama-server' ? 'llama-server' : 'mistral',
+    speech: envSpeech === 'speech_service' ? 'speech_service' : 'mistral',
+  };
+}
 
 export function useAgentStream({
   sessionId = 'sess_default',
   initialFailureMode = 'none',
 }: UseAgentStreamOptions = {}): UseAgentStreamReturn {
+  const initial = getInitialProviders();
+  const [llmProvider, setLLMProvider] = useState<LLMProvider>(initial.llm);
+  const [speechProvider, setSpeechProvider] = useState<SpeechProvider>(initial.speech);
+
   const [orbState, setOrbState] = useState<OrbState>('gray');
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
   const [failureMode, setFailureMode] = useState<FailureMode>(initialFailureMode);
@@ -99,7 +131,6 @@ export function useAgentStream({
       setStreamingAgentMessage('');
 
       setIsProcessing(false);
-      // Return to blue only if mic is active, otherwise return to gray
       setOrbState(getIdleState());
     },
     onError: (err) => {
@@ -112,8 +143,10 @@ export function useAgentStream({
     activeAgentMessageRef.current = '';
     setStreamingAgentMessage('');
     await audioPlayer.resumeAudioContext();
-    await audioPlayer.enqueueLocalGreeting(GREETING_AUDIO_URL, GREETING_TEXT);
-  }, [audioPlayer]);
+    // Correct URL pointing into /web/public/audio/
+    const greetingAudioUrl = speechProvider === 'mistral' ? '/audio/mistral.wav' : '/audio/speech.wav';
+    await audioPlayer.enqueueLocalGreeting(greetingAudioUrl, GREETING_TEXT);
+  }, [audioPlayer, speechProvider]);
 
   const processNDJSONStream = useCallback(
     async (response: Response) => {
@@ -282,19 +315,34 @@ export function useAgentStream({
     }
 
     try {
-      await fetch('/api/session/reset', {
+      const resp = await fetch('/api/session/reset', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ session_id: sessionId }),
       });
 
+      if (resp.ok) {
+        const data = await resp.json();
+        if (data.cart_state) setCartState(data.cart_state);
+        if (data.llm_provider) {
+          setLLMProvider(
+            data.llm_provider.toLowerCase() === 'llama-server' ? 'llama-server' : 'mistral'
+          );
+        }
+        if (data.speech_provider) {
+          setSpeechProvider(
+            data.speech_provider.toLowerCase() === 'speech_service' ? 'speech_service' : 'mistral'
+          );
+        }
+      } else {
+        setCartState(INITIAL_CART_STATE);
+      }
+
       setMessages([]);
       setStreamingAgentMessage('');
-      setCartState(INITIAL_CART_STATE);
       setTurnLogs([]);
       setLastMcpPayload(null);
       setIsProcessing(false);
-      // Preserve gray if the orb was never clicked; only go to blue if mic was enabled
       setOrbState(getIdleState());
     } catch (err) {
       console.error('[Session Reset Failed]', err);
@@ -311,6 +359,16 @@ export function useAgentStream({
       .then((data) => {
         if (data.cart_state) setCartState(data.cart_state);
         if (data.logs) setTurnLogs(data.logs);
+        if (data.llm_provider) {
+          setLLMProvider(
+            data.llm_provider.toLowerCase() === 'llama-server' ? 'llama-server' : 'mistral'
+          );
+        }
+        if (data.speech_provider) {
+          setSpeechProvider(
+            data.speech_provider.toLowerCase() === 'speech_service' ? 'speech_service' : 'mistral'
+          );
+        }
       })
       .catch((err) => console.error('[Session Warmup Error]', err));
 
@@ -328,6 +386,8 @@ export function useAgentStream({
   }, [sessionId]);
 
   return {
+    llmProvider,
+    speechProvider,
     orbState,
     setOrbState,
     setMicReady,

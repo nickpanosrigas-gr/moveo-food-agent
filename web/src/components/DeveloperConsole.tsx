@@ -7,13 +7,15 @@ import {
   Check,
   SlidersHorizontal,
 } from 'lucide-react';
-import type { FailureMode, TurnLog, MCPPayload } from '../types';
+import type { FailureMode, TurnLog, MCPPayload, LLMProvider, SpeechProvider } from '../types';
 
 interface DeveloperConsoleProps {
   failureMode: FailureMode;
   onFailureModeChange: (mode: FailureMode) => void;
   turnLogs: TurnLog[];
   lastMcpPayload: MCPPayload | null;
+  llmProvider: LLMProvider;
+  speechProvider: SpeechProvider;
   className?: string;
 }
 
@@ -32,6 +34,8 @@ export const DeveloperConsole: React.FC<DeveloperConsoleProps> = ({
   onFailureModeChange,
   turnLogs,
   lastMcpPayload,
+  llmProvider,
+  speechProvider,
   className = '',
 }) => {
   const [isExpanded, setIsExpanded] = useState<boolean>(false);
@@ -107,6 +111,14 @@ export const DeveloperConsole: React.FC<DeveloperConsoleProps> = ({
             <span className="px-2.5 py-0.5 rounded-md bg-white/5 border border-white/10">
               <strong className="font-bold text-white">MCP:</strong>{' '}
               {lastMcpPayload ? 'Submitted' : 'Standby'}
+            </span>
+            <span className="px-2.5 py-0.5 rounded-md bg-white/5 border border-white/10">
+              <strong className="font-bold text-white">LLM:</strong>{' '}
+              {llmProvider === 'llama-server' ? 'llama' : 'Mistral'}
+            </span>
+            <span className="px-2.5 py-0.5 rounded-md bg-white/5 border border-white/10">
+              <strong className="font-bold text-white">Voice:</strong>{' '}
+              {speechProvider === 'mistral' ? 'mistral' : 'speech'}
             </span>
           </div>
         </div>
@@ -277,7 +289,6 @@ export const DeveloperConsole: React.FC<DeveloperConsoleProps> = ({
                 ))
               )
             ) : (
-              /* TAB 2: MCP PAYLOADS */
               <div>
                 {!lastMcpPayload ? (
                   <div className="text-zinc-400 py-8 text-center select-none">

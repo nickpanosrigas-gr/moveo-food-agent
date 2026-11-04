@@ -41,6 +41,8 @@ export default function App() {
   const { resumeAudioContext } = useGlobalAudio();
 
   const {
+    llmProvider,
+    speechProvider,
     orbState,
     setOrbState,
     setMicReady,
@@ -191,7 +193,7 @@ export default function App() {
 
         {/* CENTER STAGE: Reset Button (Top), VoiceOrb (Center), DeveloperConsole (Bottom) */}
         <section className="flex-1 min-w-0 h-full flex flex-col items-center justify-between pt-6 px-4 relative">
-          {/* Top Middle: Reset Session Button (Styled identical to Developer Console Mode selector) */}
+          {/* Top Middle: Reset Session Button */}
           <div className="z-20 flex-shrink-0">
             <button
               onClick={resetSession}
@@ -229,6 +231,8 @@ export default function App() {
               onFailureModeChange={setFailureMode}
               turnLogs={turnLogs}
               lastMcpPayload={lastMcpPayload}
+              llmProvider={llmProvider}
+              speechProvider={speechProvider}
             />
           </div>
         </section>

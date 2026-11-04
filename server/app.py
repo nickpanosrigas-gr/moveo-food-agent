@@ -1,4 +1,4 @@
-# In server/app.py
+# server/app.py
 from __future__ import annotations
 
 import asyncio
@@ -9,16 +9,22 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Literal
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from server.speech import SpeechServiceClient
+from config.settings import settings
+from src.clients import (
+    SpeechClientProtocol,
+    any_service_uses_vram,
+    create_speech_client,
+    llm_uses_vram,
+    speech_uses_vram,
+)
 from src.core.agent_loop import FoodOrderAgent
 from src.utils.logger import setup_logging
 
-# Initialize single consistent logger across the app and Uvicorn
 setup_logging()
 logger = logging.getLogger("server.app")
 
@@ -27,29 +33,39 @@ INACTIVITY_TIMEOUT_SECONDS = 900
 
 
 class SessionManager:
-    """Manages per-tab FoodOrderAgent instances and deduplicates VRAM warmups."""
-
-    def __init__(self, speech_client: SpeechServiceClient):
+    def __init__(self, speech_client: SpeechClientProtocol):
         self.speech = speech_client
         self.sessions: dict[str, FoodOrderAgent] = {}
         self.last_active: dict[str, float] = {}
-        self.models_loaded: bool = False
+        self.models_loaded: bool = not any_service_uses_vram()
         self._warmup_in_progress = False
+        self._warmup_task: asyncio.Task | None = None
         self._watchdog_task: asyncio.Task | None = None
         self._lock = asyncio.Lock()
 
     def start_watchdog(self) -> None:
+        if not any_service_uses_vram():
+            logger.info("[VRAM] Active providers do not use local GPU VRAM. Watchdog loop skipped.")
+            return
+
         if self._watchdog_task is None or self._watchdog_task.done():
             self._watchdog_task = asyncio.create_task(self._inactivity_loop())
 
     async def stop_watchdog(self) -> None:
         if self._watchdog_task and not self._watchdog_task.done():
             self._watchdog_task.cancel()
-        tasks = [self.speech.unload_models()]
+
+        tasks = []
+        if speech_uses_vram():
+            tasks.append(self.speech.unload_models())
+
         temp_agent = next(iter(self.sessions.values()), None)
-        if temp_agent:
+        if temp_agent and llm_uses_vram():
             tasks.append(temp_agent.llm.unload_model())
-        await asyncio.gather(*tasks, return_exceptions=True)
+
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
         await self.speech.close()
 
     async def get_or_create_agent(self, session_id: str) -> FoodOrderAgent:
@@ -65,24 +81,30 @@ class SessionManager:
 
             agent = self.sessions[session_id]
 
-            # Start parallel warmup in the background as soon as the tab opens
-            if not self.models_loaded and not self._warmup_in_progress:
+            if any_service_uses_vram() and not self.models_loaded and not self._warmup_in_progress:
                 self._warmup_in_progress = True
                 self._warmup_task = asyncio.create_task(self._run_warmup(agent))
 
             return agent
 
     async def _run_warmup(self, agent: FoodOrderAgent) -> None:
+        if not any_service_uses_vram():
+            self.models_loaded = True
+            return
+
         try:
             t0 = time.monotonic()
-            logger.info("[VRAM] Warming up Faster-Whisper, Kokoro, and llama-server in parallel...")
-            speech_res, llm_res = await asyncio.gather(
-                self.speech.warmup_models(keep_alive=INACTIVITY_TIMEOUT_SECONDS),
-                agent.warmup_async(),
-                return_exceptions=True,
-            )
+            logger.info("[VRAM] Warming up active local models...")
+
+            tasks = []
+            if speech_uses_vram():
+                tasks.append(self.speech.warmup_models(keep_alive=INACTIVITY_TIMEOUT_SECONDS))
+            if llm_uses_vram():
+                tasks.append(agent.warmup_async())
+
+            results = await asyncio.gather(*tasks, return_exceptions=True)
             elapsed = time.monotonic() - t0
-            logger.info(f"[VRAM] Warmup finished in {elapsed:.2f}s | Speech: {speech_res} | LLM: {llm_res}")
+            logger.info(f"[VRAM] Warmup completed in {elapsed:.2f}s | Results: {results}")
             self.models_loaded = True
         finally:
             self._warmup_in_progress = False
@@ -97,14 +119,21 @@ class SessionManager:
             self.last_active.pop(session_id, None)
             remaining = len(self.sessions)
 
+        if not any_service_uses_vram():
+            if closing_agent:
+                closing_agent.llm.close()
+            return {"status": "session_closed", "active_sessions_remaining": remaining}
+
         if remaining == 0:
             await asyncio.sleep(5.0)
             async with self._lock:
                 if len(self.sessions) == 0 and self.models_loaded:
                     logger.info("[SESSION] All tabs closed. Offloading GPU VRAM...")
                     self.models_loaded = False
-                    tasks = [self.speech.unload_models()]
-                    if closing_agent is not None:
+                    tasks = []
+                    if speech_uses_vram():
+                        tasks.append(self.speech.unload_models())
+                    if closing_agent is not None and llm_uses_vram():
                         tasks.append(closing_agent.llm.unload_model())
                     unload_res = await asyncio.gather(*tasks, return_exceptions=True)
                     return {"status": "unloaded_vram", "details": [str(r) for r in unload_res]}
@@ -123,6 +152,8 @@ class SessionManager:
             "status": "reset",
             "session_id": session_id,
             "cart_state": agent.cart.get_state_snapshot(),
+            "llm_provider": settings.LLM_PROVIDER,
+            "speech_provider": settings.SPEECH_PROVIDER,
         }
 
     async def _inactivity_loop(self) -> None:
@@ -145,12 +176,16 @@ class SessionManager:
                     self.models_loaded = False
                     should_unload = True
 
-            if should_unload:
+            if should_unload and any_service_uses_vram():
                 logger.info("[VRAM] All sessions idle for 15m. Offloading VRAM...")
-                await self.speech.unload_models()
+                tasks = []
+                if speech_uses_vram():
+                    tasks.append(self.speech.unload_models())
+                if tasks:
+                    await asyncio.gather(*tasks, return_exceptions=True)
 
 
-speech_client = SpeechServiceClient(default_keep_alive=INACTIVITY_TIMEOUT_SECONDS)
+speech_client: SpeechClientProtocol = create_speech_client(default_keep_alive=INACTIVITY_TIMEOUT_SECONDS)
 session_manager = SessionManager(speech_client=speech_client)
 
 
@@ -269,6 +304,15 @@ async def _stream_agent_turn(
         yield _ndjson_line({"type": "error", "error": str(exc)})
 
 
+@app.get("/api/config")
+async def get_config_endpoint() -> dict[str, str]:
+    """Exposes the active engines to the frontend."""
+    return {
+        "llm_provider": settings.LLM_PROVIDER,
+        "speech_provider": settings.SPEECH_PROVIDER,
+    }
+
+
 @app.post("/api/chat/text")
 async def chat_text_endpoint(req: TextChatRequest) -> StreamingResponse:
     agent = await session_manager.get_or_create_agent(req.session_id)
@@ -290,7 +334,7 @@ async def chat_voice_endpoint(
 ) -> StreamingResponse:
     agent = await session_manager.get_or_create_agent(session_id)
     if getattr(session_manager, "_warmup_task", None) and not session_manager._warmup_task.done():
-            await session_manager._warmup_task
+        await session_manager._warmup_task
     await session_manager.touch_session(session_id)
     audio_bytes = await file.read()
     filename = file.filename or f"recording_{uuid.uuid4().hex[:6]}.wav"
@@ -306,7 +350,7 @@ async def chat_voice_endpoint(
                 filename=filename,
                 keep_alive=INACTIVITY_TIMEOUT_SECONDS,
             )
-            logger.info(f"[STT] Transcribed user voice: \"{transcribed_text}\"")
+            logger.info(f'[STT] Transcribed user voice: "{transcribed_text}"')
         except Exception as stt_exc:
             logger.error(f"[STT] Failed to transcribe: {stt_exc}", exc_info=True)
             yield _ndjson_line({"type": "error", "error": f"Speech-to-text failed: {stt_exc}"})
@@ -336,15 +380,16 @@ async def chat_voice_endpoint(
 @app.post("/api/session/start")
 async def start_session_endpoint(req: SessionLifecycleRequest) -> dict[str, Any]:
     agent = await session_manager.get_or_create_agent(req.session_id)
-    # Ensure all models are fully resident in VRAM before marking session as ready
-    if not session_manager.models_loaded:
+    if not session_manager.models_loaded and any_service_uses_vram():
         await session_manager._run_warmup(agent)
-        
+
     return {
         "status": "ready",
         "session_id": req.session_id,
         "cart_state": agent.cart.get_state_snapshot(),
         "logs": agent.turn_logger.get_recent_logs(),
+        "llm_provider": settings.LLM_PROVIDER,
+        "speech_provider": settings.SPEECH_PROVIDER,
     }
 
 

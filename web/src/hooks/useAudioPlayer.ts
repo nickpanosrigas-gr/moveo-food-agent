@@ -198,8 +198,8 @@ export function useAudioPlayer({
   );
 
   /**
-   * Fetches a local audio file from web/public (e.g. /audio/greeting.wav)
-   * and plays it through the exact same synchronized purple orb & bubble pipeline.
+   * Fetches a local audio file (e.g. /audio/mistral.wav or /audio/speech.wav)
+   * Guarded against Vite SPA HTML fallback responses.
    */
   const enqueueLocalGreeting = useCallback(
     async (audioUrl: string, text: string) => {
@@ -209,12 +209,23 @@ export function useAudioPlayer({
       let decodedBuffer: AudioBuffer | null = null;
 
       try {
-        const res = await fetch(audioUrl);
-        if (res.ok) {
+        let res = await fetch(audioUrl);
+        let contentType = res.headers.get('content-type') || '';
+
+        // If returned 404 or Vite SPA fallback index.html, try alternative path
+        if (!res.ok || contentType.includes('text/html')) {
+          const altUrl = audioUrl.startsWith('/audio/')
+            ? audioUrl.replace('/audio/', '/')
+            : `/audio${audioUrl}`;
+          res = await fetch(altUrl);
+          contentType = res.headers.get('content-type') || '';
+        }
+
+        if (res.ok && !contentType.includes('text/html')) {
           const rawBuffer = await res.arrayBuffer();
           decodedBuffer = await ctx.decodeAudioData(rawBuffer);
         } else {
-          console.warn(`[Greeting Audio] ${audioUrl} not found, using timed text fallback.`);
+          console.warn(`[Greeting Audio] Could not load valid audio file from '${audioUrl}', using timed fallback.`);
         }
       } catch (err) {
         console.warn('[Greeting Audio] Failed to decode local greeting file, using fallback:', err);

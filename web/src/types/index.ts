@@ -7,6 +7,9 @@ export type FailureMode =
   | 'schema_error'
   | 'business_refusal';
 
+export type LLMProvider = 'mistral' | 'llama-server';
+export type SpeechProvider = 'mistral' | 'speech_service';
+
 export interface CartLineItem {
   line_id: string;
   item_id: string;

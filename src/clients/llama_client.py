@@ -1,21 +1,29 @@
-# src/core/llm_client.py
+# src/clients/llama_client.py
 from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any
 
 import httpx
 from config.settings import settings
-
-import re
+from src.clients.errors import (
+    EndpointOrModelNotFoundError,
+    request_with_retry_async,
+    request_with_retry_sync,
+)
 
 THINKING_REGEX = re.compile(r"<think>[\s\S]*?</think>|(?:\A|^)\s*</think>|<\/?think>", re.IGNORECASE)
 
 logger = logging.getLogger(__name__)
 
 
-class LLMClient:
+class LlamaClient:
+    """Synchronous HTTP client for local llama-server backend with GPU VRAM management and error handling."""
+
+    manages_vram: bool = True
+
     def __init__(
         self,
         base_url: str | None = None,
@@ -23,11 +31,13 @@ class LLMClient:
         num_ctx: int | None = None,
         default_keep_alive: str = "15m",
         timeout_seconds: float = 60.0,
+        max_retries: int = 3,
     ):
-        self.base_url = (base_url or settings.LLM_URL).rstrip("/")
-        self.model = model or settings.LLM_MODEL
-        self.num_ctx = num_ctx or settings.LLM_CTX
+        self.base_url = (base_url or settings.LLAMA_URL).rstrip("/")
+        self.model = model or settings.LLAMA_MODEL
+        self.num_ctx = num_ctx or settings.LLAMA_CTX
         self.default_keep_alive = default_keep_alive
+        self.max_retries = max_retries
         self.timeout = httpx.Timeout(timeout_seconds, connect=10.0)
         self._sync_client = httpx.Client(base_url=self.base_url, timeout=self.timeout)
 
@@ -59,8 +69,12 @@ class LLMClient:
             payload["tool_choice"] = "auto"
 
         logger.info(f"[llama-server] Calling {self.model} via /v1/chat/completions...")
-        response = self._sync_client.post("/v1/chat/completions", json=payload)
-        response.raise_for_status()
+        response = request_with_retry_sync(
+            request_fn=lambda: self._sync_client.post("/v1/chat/completions", json=payload),
+            provider="llama-server",
+            context_hint=f"url='{self.base_url}/v1/chat/completions', model='{self.model}'",
+            max_retries=self.max_retries,
+        )
         data = response.json()
 
         choice = data.get("choices", [{}])[0]
@@ -77,7 +91,16 @@ class LLMClient:
             "model": self.model,
             "messages": [
                 {"role": "system", "content": static_system_prompt},
-                {"role": "user", "content": "[LIVE CART CONTEXT]\nCURRENT CART STATE: Empty (0 items, Total: $0.00).\nAWAITING_FINAL_CONFIRMATION: False\n[/LIVE CART CONTEXT]\n\nUser: hi"},
+                {
+                    "role": "user",
+                    "content": (
+                        "[LIVE CART CONTEXT]\n"
+                        "CURRENT CART STATE: Empty (0 items, Total: $0.00).\n"
+                        "AWAITING_FINAL_CONFIRMATION: False\n"
+                        "[/LIVE CART CONTEXT]\n\n"
+                        "User: hi"
+                    ),
+                },
             ],
             "tools": tools,
             "tool_choice": "auto",
@@ -87,9 +110,13 @@ class LLMClient:
             "cache_prompt": True,
             "chat_template_kwargs": {"enable_thinking": False},
         }
-        logger.info(f"[llama-server] Warming up KV cache for static system prompt...")
-        resp = self._sync_client.post("/v1/chat/completions", json=payload)
-        resp.raise_for_status()
+        logger.info("[llama-server] Warming up KV cache for static system prompt...")
+        resp = request_with_retry_sync(
+            request_fn=lambda: self._sync_client.post("/v1/chat/completions", json=payload),
+            provider="llama-server",
+            context_hint=f"url='{self.base_url}/v1/chat/completions', model='{self.model}'",
+            max_retries=self.max_retries,
+        )
         data = resp.json()
         prompt_tokens = data.get("usage", {}).get("prompt_tokens", 0)
         logger.info(f"[llama-server] KV cache ready ({prompt_tokens} prompt tokens cached).")
@@ -109,7 +136,16 @@ class LLMClient:
             "model": self.model,
             "messages": [
                 {"role": "system", "content": static_system_prompt},
-                {"role": "user", "content": "[LIVE CART CONTEXT]\nCURRENT CART STATE: Empty (0 items, Total: $0.00).\nAWAITING_FINAL_CONFIRMATION: False\n[/LIVE CART CONTEXT]\n\nUser: hi"},
+                {
+                    "role": "user",
+                    "content": (
+                        "[LIVE CART CONTEXT]\n"
+                        "CURRENT CART STATE: Empty (0 items, Total: $0.00).\n"
+                        "AWAITING_FINAL_CONFIRMATION: False\n"
+                        "[/LIVE CART CONTEXT]\n\n"
+                        "User: hi"
+                    ),
+                },
             ],
             "tools": tools,
             "tool_choice": "auto",
@@ -119,10 +155,14 @@ class LLMClient:
             "cache_prompt": True,
             "chat_template_kwargs": {"enable_thinking": False},
         }
-        logger.info(f"[llama-server Async] Warming up KV cache...")
+        logger.info("[llama-server Async] Warming up KV cache...")
         async with httpx.AsyncClient(base_url=self.base_url, timeout=self.timeout) as client:
-            resp = await client.post("/v1/chat/completions", json=payload)
-            resp.raise_for_status()
+            resp = await request_with_retry_async(
+                request_fn=lambda: client.post("/v1/chat/completions", json=payload),
+                provider="llama-server",
+                context_hint=f"url='{self.base_url}/v1/chat/completions', model='{self.model}'",
+                max_retries=self.max_retries,
+            )
             data = resp.json()
             prompt_tokens = data.get("usage", {}).get("prompt_tokens", 0)
             logger.info(f"[llama-server Async] KV cache ready ({prompt_tokens} prompt tokens cached).")
@@ -133,13 +173,21 @@ class LLMClient:
             }
 
     def unload_model_sync(self) -> dict[str, Any]:
-        logger.info(f"[llama-server] Offloading model from GPU VRAM via /models/unload...")
+        logger.info("[llama-server] Offloading model from GPU VRAM via /models/unload...")
         try:
             resp = self._sync_client.post("/models/unload", json={"model": self.model})
             if resp.status_code in (200, 204):
-                logger.info(f"[llama-server] Model successfully offloaded from VRAM.")
+                logger.info("[llama-server] Model successfully offloaded from VRAM.")
                 return {"status": "unloaded", "model": self.model}
-            self._sync_client.post("/slots/0?action=erase")
+            if resp.status_code == 404:
+                logger.info("[llama-server] /models/unload not found (404), falling back to /slots/0?action=erase...")
+            slot_resp = self._sync_client.post("/slots/0?action=erase")
+            if slot_resp.status_code == 404:
+                raise EndpointOrModelNotFoundError(
+                    "llama-server",
+                    f"Neither '/models/unload' nor '/slots/0' found on {self.base_url} (HTTP 404).",
+                    status_code=404,
+                )
             return {"status": "slot_cleared", "model": self.model}
         except Exception as exc:
             logger.warning(f"[llama-server] Model unload warning: {exc}")
@@ -148,16 +196,25 @@ class LLMClient:
             self.close()
 
     async def unload_model(self) -> dict[str, Any]:
-        logger.info(f"[llama-server Async] Offloading model from GPU VRAM...")
+        logger.info("[llama-server Async] Offloading model from GPU VRAM...")
         async with httpx.AsyncClient(base_url=self.base_url, timeout=self.timeout) as client:
             try:
                 resp = await client.post("/models/unload", json={"model": self.model})
                 if resp.status_code in (200, 204):
-                    logger.info(f"[llama-server Async] Model offloaded successfully.")
+                    logger.info("[llama-server Async] Model offloaded successfully.")
                     return {"status": "unloaded", "model": self.model}
-                await client.post("/slots/0?action=erase")
+                if resp.status_code == 404:
+                    logger.info("[llama-server Async] /models/unload returned 404, trying /slots/0?action=erase...")
+                slot_resp = await client.post("/slots/0?action=erase")
+                if slot_resp.status_code == 404:
+                    raise EndpointOrModelNotFoundError(
+                        "llama-server",
+                        f"Neither '/models/unload' nor '/slots/0' found on {self.base_url} (HTTP 404).",
+                        status_code=404,
+                    )
                 return {"status": "slot_cleared", "model": self.model}
             except Exception as exc:
+                logger.warning(f"[llama-server Async] Model unload warning: {exc}")
                 return {"status": "error", "error": str(exc)}
 
     @staticmethod
@@ -192,12 +249,10 @@ class LLMClient:
                 }
             )
 
-        # Fallback to reasoning_content if content is None, but clean thinking tags
         content = msg.get("content")
         if content is None:
             content = msg.get("reasoning_content") or ""
 
-        # Clean any <think>...</think>, </think>, or orphaned tags
         cleaned_content = THINKING_REGEX.sub("", str(content)).strip()
 
         out: dict[str, Any] = {

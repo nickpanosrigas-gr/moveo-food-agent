@@ -9,12 +9,18 @@ services:
       - "${BACKEND_EXTERNAL_PORT}:${BACKEND_INTERNAL_PORT}"
     environment:
       - PORT=${BACKEND_INTERNAL_PORT}
-      - LLM_URL=${LLM_URL}
-      - LLM_MODEL=${LLM_MODEL}
-      - LLM_CTX=${LLM_CTX}
+      - LLM_PROVIDER=${LLM_PROVIDER:-mistral}
+      - SPEECH_PROVIDER=${SPEECH_PROVIDER:-mistral}
+      - MISTRAL_API_KEY=${MISTRAL_API_KEY:-}
+      - MISTRAL_LLM=${MISTRAL_LLM:-deepseek-v4-1-flash-1017}
+      - MISTRAL_STT=${MISTRAL_STT:-voxtral-mini-transcribe-realtime-3}
+      - MISTRAL_TTS=${MISTRAL_TTS:-voxtral-mini-tts-3-0}
+      - LLAMA_URL=${LLAMA_URL:-}
+      - LLAMA_MODEL=${LLAMA_MODEL:-Qwen3.6-35B-A3B}
+      - LLAMA_CTX=${LLAMA_CTX:-32768}
+      - SPEECH_SERVICE_URL=${SPEECH_SERVICE_URL:-}
       - APPLICANT_EMAIL=${APPLICANT_EMAIL}
       - MCP_SERVER_URL=${MCP_SERVER_URL}
-      - SPEECH_URL=${SPEECH_URL}
 
   web:
     build:
@@ -26,5 +32,7 @@ services:
       - "${WEB_EXTERNAL_PORT}:${WEB_INTERNAL_PORT}"
     environment:
       - WEB_INTERNAL_PORT=${WEB_INTERNAL_PORT}
+      - LLM_PROVIDER=${LLM_PROVIDER:-mistral}
+      - SPEECH_PROVIDER=${SPEECH_PROVIDER:-mistral}
     depends_on:
       - backend
