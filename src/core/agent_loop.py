@@ -495,11 +495,19 @@ class FoodOrderAgent:
             phrase in lower_agent
             for phrase in (
                 "ready to submit",
-                "would you like to submit",
+                "like to submit",
+                "like me to submit",
+                "review and submit",
                 "shall i submit",
                 "confirm your order",
                 "ready to place",
+                "like to place",
+                "shall i place",
+                "ready to checkout",
             )
+        ) or (
+            bool(CHECKOUT_INTENT_REGEX.search(user_text))
+            and not self.cart.modified_in_current_turn
         )
 
         # STRICT RULE: Awaiting confirmation is ONLY True if the agent explicitly asked the question this turn

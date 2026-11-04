@@ -6,21 +6,21 @@ services:
     container_name: moveo-food-agent-backend
     restart: unless-stopped
     ports:
-      - "${BACKEND_EXTERNAL_PORT}:${BACKEND_INTERNAL_PORT}"
+      - "${BACKEND_EXTERNAL_PORT:-8005}:${BACKEND_INTERNAL_PORT:-8000}"
     environment:
-      - PORT=${BACKEND_INTERNAL_PORT}
-      - LLM_PROVIDER=${LLM_PROVIDER:-mistral}
-      - SPEECH_PROVIDER=${SPEECH_PROVIDER:-mistral}
-      - MISTRAL_API_KEY=${MISTRAL_API_KEY:-}
-      - MISTRAL_LLM=${MISTRAL_LLM:-deepseek-v4-1-flash-1017}
+      - PORT=${BACKEND_INTERNAL_PORT:-8000}
+      - LLM_PROVIDER=${LLM_PROVIDER:-llama-server}
+      - SPEECH_PROVIDER=${SPEECH_PROVIDER:-speech_service}
+      - MISTRAL_API_KEY=${MISTRAL_API_KEY:-your_mistral_api_key_here}
+      - MISTRAL_LLM=${MISTRAL_LLM:-ministral-14b-2512}
       - MISTRAL_STT=${MISTRAL_STT:-voxtral-mini-transcribe-realtime-3}
       - MISTRAL_TTS=${MISTRAL_TTS:-voxtral-mini-tts-3-0}
-      - LLAMA_URL=${LLAMA_URL:-}
+      - LLAMA_URL=${LLAMA_URL:-https://llama.pali.autos}
       - LLAMA_MODEL=${LLAMA_MODEL:-Qwen3.6-35B-A3B}
-      - LLAMA_CTX=${LLAMA_CTX:-32768}
-      - SPEECH_SERVICE_URL=${SPEECH_SERVICE_URL:-}
-      - APPLICANT_EMAIL=${APPLICANT_EMAIL}
-      - MCP_SERVER_URL=${MCP_SERVER_URL}
+      - LLAMA_CTX=${LLAMA_CTX:-16384}
+      - SPEECH_SERVICE_URL=${SPEECH_SERVICE_URL:-https://speech.pali.autos}
+      - APPLICANT_EMAIL=${APPLICANT_EMAIL:-nickpanosrigas@gmail.com}
+      - MCP_SERVER_URL=${MCP_SERVER_URL:-https://webviews-git-moveo-food-nlp-assignment-moveo-ai.vercel.app/api/demo/mcp}
 
   web:
     build:
@@ -29,10 +29,10 @@ services:
     container_name: moveo-food-agent-web
     restart: unless-stopped
     ports:
-      - "${WEB_EXTERNAL_PORT}:${WEB_INTERNAL_PORT}"
+      - "${WEB_EXTERNAL_PORT:-3005}:${WEB_INTERNAL_PORT:-3000}"
     environment:
-      - WEB_INTERNAL_PORT=${WEB_INTERNAL_PORT}
-      - LLM_PROVIDER=${LLM_PROVIDER:-mistral}
-      - SPEECH_PROVIDER=${SPEECH_PROVIDER:-mistral}
+      - WEB_INTERNAL_PORT=${WEB_INTERNAL_PORT:-3000}
+      - LLM_PROVIDER=${LLM_PROVIDER:-llama-server}
+      - SPEECH_PROVIDER=${SPEECH_PROVIDER:-speech_service}
     depends_on:
       - backend
