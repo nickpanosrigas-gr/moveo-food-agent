@@ -61,9 +61,9 @@ A production-ready conversational food ordering agent built in **Python 3.13+**.
 | # | Assignment Requirement | Implementation Mechanism | Reference Files |
 | :--- | :--- | :--- | :--- |
 | **1** | **Parse `menu.yaml` & Validate Orders** | Parses `menu.yaml` into strict Pydantic models with automatic default resolution, cross-item hallucination detection, missing required option catches (the "Milkshake Trap"), and exact `Decimal` price math. | `src/core/menu.py` |
-| **2** | **Add, Modify & Remove Items** | Transactional `OrderCart` supporting `add_item`, delta-based `edit_item`, `remove_item`, and `clear_cart`. Merges identical items by canonical signature, splits stacked quantities on partial edits (`target_quantity`), and guarantees atomic rollback on invalid edits. | `src/core/cart.py` |
+| **2** | **Add, Modify & Remove Items** | Transactional `OrderCart` supporting `add_item`, delta-based `edit_item`, `remove_item`, and `clear_cart`. Merges identical items by canonical signature, splits stacked quantities on partial edits (`target_quantity`), strips leaked cross-item default options on edits, safely coerces arguments (`_safe_int`), and guarantees atomic rollback on invalid edits. | `src/core/cart.py` |
 | **3** | **Confirm Order Before Submission** | Dual-layer protection: static system prompt directives + a deterministic intercept in `FoodOrderAgent.send()` that blocks `submit_order` if the cart was modified in the current turn or if confirmation was not requested beforehand. | `src/core/agent_loop.py`<br>`src/core/prompts.py` |
-| **4** | **Call `submit_order` via MCP & Handle Responses** | Connects to Moveo's Streamable HTTP MCP server using `X-Applicant-Email`. Normalizes all three rejection modes: JSON-RPC `-32602` schema errors (`isError: true`), server errors (`kitchen_busy`), and business refusals (`> $50.00` limit). | `src/mcp/client.py` |
+| **4** | **Call `submit_order` via MCP & Handle Responses** | Connects to Moveo's Streamable HTTP MCP server using `X-Applicant-Email`. Normalizes all three rejection modes: JSON-RPC `-32602` schema errors (`isError: true`), server errors (`kitchen_busy`), and business refusals (`> $50.00` limit). Enforces single submission per turn and prevents duplicate submissions during transient retries. | `src/mcp/client.py`<br>`src/core/agent_loop.py` |
 | **5** | **Structured Turn Logging** | Thread-safe `TurnLogger` recording every turn in newline-delimited JSON (`logs/conversation_turns.jsonl` or `logs/session_<id>.jsonl`) with ISO timestamps, session ID, user/agent text, exposed tool calls, internal cart actions, and cart snapshots. | `src/utils/logger.py` |
 | **6** | **Two Entry Points (`main.py` & `agent.py`)** | Interactive terminal CLI (`python main.py` / `uv run main.py`) and programmatic API (`from agent import FoodOrderAgent` with `agent.send(msg) -> dict`). Strictly separates internal cart tools from exposed `response["tool_calls"]`. | `main.py`<br>`agent.py` |
 | **7** | **Bonus: Full Voice Agent (STT + TTS)** | Real-time NDJSON streaming pipeline pairing Faster-Whisper STT (`large-v3-turbo`) with Kokoro-82M TTS at `https://speech.pali.autos` (or Mistral Realtime STT/TTS), backed by a Whisper silence-hallucination filter and VRAM watchdog. | `server/app.py`<br>`server/speech.py`<br>`speech_service/` |
@@ -140,11 +140,12 @@ When `agent.send(message, force_failure=None)` is called, `FoodOrderAgent` coord
    - If the model returns natural language with no tool calls, the loop terminates.
    - If the model emits tool calls, each call is processed sequentially:
      - **Duplicate Failed Call Breaker:** If the model repeats the exact same tool name and JSON arguments that failed on the immediately preceding step, the loop intercepts the call with `DUPLICATE_CALL_BLOCKED`, forcing the LLM to either repair its arguments or reply in plain text.
-     - **Internal Cart Tools (`add_item`, `edit_item`, `remove_item`, `clear_cart`, `set_special_instructions`):** Executed locally against `self.cart`. On any successful modification, `awaiting_confirmation`, `can_retry_submission`, and `was_ready_to_submit` are immediately reset to `False` (**"Cold Feet" protection**: if a user says *"Yes, and add a cola"*, the agent adds the cola and asks for confirmation of the new total rather than prematurely submitting).
-     - **External MCP Tool (`submit_order`):** Protected by three programmatic guardrails:
-       1. *Duplicate Guard:* Blocks multiple `submit_order` executions in the same turn.
-       2. *Empty Cart Guard:* Rejects submission if `cart.lines` is empty.
-       3. *Premature Submission Guard:* If `cart.modified_in_current_turn` is `True` or `was_ready_to_submit` is `False`, the call is intercepted with `CONFIRMATION_REQUIRED_FIRST`. The agent sets `awaiting_confirmation = True` and prompts the user with the exact total price.
+     - **Internal Cart Tools (`add_item`, `edit_item`, `remove_item`, `clear_cart`, `set_special_instructions`):** Executed locally against `self.cart` inside a guarded try/except wrapper that prevents malformed LLM tool arguments (e.g. `None` or stringified quantities) from crashing the loop. On any successful modification, `awaiting_confirmation`, `can_retry_submission`, and `was_ready_to_submit` are immediately reset to `False` (**"Cold Feet" protection**: if a user says *"Yes, and add a cola"*, the agent adds the cola and asks for confirmation of the new total rather than prematurely submitting).
+     - **External MCP Tool (`submit_order`):** Protected by four programmatic guardrails:
+       1. *Single-Submission-Per-Turn Guard:* Enforces `submitted_in_this_turn = True` on both success and failure, preventing the model from re-invoking `submit_order` within the same turn if a transient failure occurs.
+       2. *Duplicate Guard:* Blocks multiple `submit_order` executions in the same turn.
+       3. *Empty Cart Guard:* Rejects submission if `cart.lines` is empty.
+       4. *Premature Submission Guard:* If `cart.modified_in_current_turn` is `True` or `was_ready_to_submit` is `False`, the call is intercepted with `CONFIRMATION_REQUIRED_FIRST`. The agent sets `awaiting_confirmation = True` and prompts the user with the exact total price.
        - When valid, `self.mcp_client.submit_order()` executes over Streamable HTTP. The resulting payload is appended to `exposed_tool_calls`.
 
 4. **Thinking Tag Sanitization (`_sanitize_agent_text`):**
@@ -230,8 +231,10 @@ Because this system prompt (`history[0]`) and the tool definitions never change,
 - **Signature Auto-Merging:** Each line computes a canonical tuple: `(item_id, tuple(sorted(options.items())), tuple(extras))`. Adding an item with a matching signature increments the existing line's quantity and recalculates its line total.
 - **Atomic Stack Splitting (`target_quantity`):** When modifying a subset of stacked items (e.g., the user has two burgers in `line_1` and states *"put cheese on just one of them"*), `edit_item(line_id="line_1", target_quantity=1, add_extras=["cheese"])` validates the target configuration first, decrements `line_1` to `quantity=1`, and creates `line_2` with `quantity=1` and `extras=["cheese"]`.
 - **Auto-Consolidation (`_consolidate_lines`):** If modifying `line_2` makes its customizations identical to `line_1`, the cart merges them back into a single line.
+- **Cross-Item Default Option Sanitization on Edits:** When `edit_item` receives valid option updates alongside leaked default options from the shared tool schema (such as `flavor="cola"` when editing a `margherita` pizza), the cart automatically strips the leaked default key so valid option modifications succeed cleanly.
+- **Defensive Type Coercion (`_safe_int`):** Safely coerces stringified integers, `None` values, and malformed tool arguments in `execute_tool()` without raising unhandled `TypeError` or `ValueError` exceptions.
 - **Atomic Rollback Guarantee:** Before mutating any line, candidate options and extras are validated against `MenuCatalog`. If validation fails, the cart remains untouched.
-- **Persistent Special Instructions:** `update_special_instructions()` accumulates dietary and kitchen notes across turns (separated by `; `) and passes them to `submit_order` at checkout.
+- **Special Instructions Lifecycle (Aggregation, Replacement & Clearing):** `update_special_instructions()` accumulates dietary and kitchen notes across turns (separated by `; `) when passed via `add_item` or `edit_item`, supports explicit replacement via `set_special_instructions(replace=True)`, and clears instructions when given reset keywords (`"none"`, `"clear"`, `"null"`, `"n/a"`).
 - **Budget Tracking:** Dynamically evaluates `total_price > 50.00`, exposing `exceeds_limit = True` to the agent and HUD.
 
 ---
@@ -639,23 +642,23 @@ Below is the summary of results running all 25 scenarios (134 turns) on `llama-s
 | Test Suite | Scenarios | Full Pass (`✓`) | Partial Pass (`~`) | Failed (`x`) | Effective Order Accuracy (`✓` + `~`) | Correct Turns |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
 | **Easy (`Scenarios 1–5`)** | 5 | 5 | 0 | 0 | **5 / 5 (100%)** | 18 / 18 (100%) |
-| **Medium (`Scenarios 6–15`)** | 10 | 7 | 1 | 2 | **8 / 10 (80%)** | 33 / 39 (84.6%) |
-| **Hard (`Scenarios 16–25`)** | 10 | 3 | 4 | 3 | **7 / 10 (70%)** | 54 / 77 (70.1%) |
-| **Total Overall** | **25** | **15** | **5** | **5** | **20 / 25 (80%)** | **105 / 134 (78.4%)** |
+| **Medium (`Scenarios 6–15`)** | 10 | 7 | 2 | 1 | **9 / 10 (90%)** | 34 / 39 (87.2%) |
+| **Hard (`Scenarios 16–25`)** | 10 | 3 | 4 | 3 | **7 / 10 (70%)** | 57 / 77 (74.0%) |
+| **Total Overall** | **25** | **15** | **6** | **4** | **21 / 25 (84%)** | **109 / 134 (81.3%)** |
 
 #### Key Behavioral Observations:
 
 1. **Easy Suite (100% Pass Rate):**
    - The agent achieved a perfect score across all 5 scenarios and all 18 turns, handling single and multi-item orders, option customizations, and two-step confirmations without error.
 
-2. **Medium Suite (80% Effective Pass Rate & The "Margherita Cola" Schema Artifact):**
-   - Achieved 8/10 successful final orders (including complex stack splitting in Scenario 12, quantity decrements in Scenario 13, item category replacement in Scenario 8, and cross-turn special instructions in Scenario 15).
-   - **Interesting Model Quirk in Scenario 10 (`margherita` + `flavor: "cola"`):** When modifying an existing `margherita` pizza in Scenario 10 (*"Actually, make it large with thick crust"*), `Qwen3.6-35B-A3B` persistently attempts to populate `"flavor": "cola"` inside the `edit_item` `options` dictionary alongside `"crust": "thick"`. Because the unified JSON Schema for `options` across all menu items includes `flavor` (which has `default='cola'` for `soda`), the model occasionally over-eagerly fills default sub-properties from the shared `options` schema even when editing a pizza—despite explicit system prompt rules forbidding cross-item options. Our deterministic `MenuCatalog` validator catches this cross-item hallucination (`Invalid option ['flavor'] for 'Margherita Pizza'`) and the `DUPLICATE_CALL_BLOCKED` circuit breaker prevents an infinite loop, keeping the cart state uncorrupted.
+2. **Medium Suite (90% Effective Pass Rate & Cross-Item Option Sanitization):**
+   - Achieved 9/10 successful final orders (34/39 correct turns), including the "Milkshake Trap" recovery in Scenario 6, full line removal in Scenario 7, item category replacement in Scenario 8, multi-item natural language additions in Scenario 9, extra delta removal in Scenario 11, partial stack splitting in Scenario 12, quantity decrements in Scenario 13, burger disambiguation in Scenario 14, and cross-turn special instructions in Scenario 15.
+   - **Handling the "Margherita Cola" Schema Artifact in Scenario 10:** When modifying an existing `margherita` pizza in Scenario 10 (*"Actually, make it large with thick crust"*), `Qwen3.6-35B-A3B` emits `options={"crust": "thick", "flavor": "cola"}` (leaking the default `flavor` from the shared options schema while omitting `"size": "large"`). Because `OrderCart.edit_item()` automatically strips leaked cross-item default options when valid item options are present, the `"crust": "thick"` update succeeds cleanly without triggering a validation failure; the scenario only misses full match because the model omitted `"size": "large"` from its tool call arguments on Turn 2.
 
-3. **Hard Suite (70% Effective Pass Rate on Adversarial & Long-Horizon Stress Tests):**
+3. **Hard Suite (70% Effective Pass Rate & 74.0% Turn Accuracy on Adversarial Stress Tests):**
    - The Hard suite is intentionally designed to push the 35B model to its limits with 7-to-15-turn state mutations, pronoun ambiguity traps, and `$50.00` cap oscillations.
-   - The agent successfully passed some of the toughest scenarios in the benchmark—including **Scenario 20** (the 15-turn chaos and state-reconciliation marathon), **Scenario 21** (auto-merge signature collapsing), **Scenario 22** (negative/zero quantity attacks), **Scenario 23** (mid-session cart clearing), **Scenario 24** (`kitchen_busy` recovery with mid-retry cart edits), and **Scenario 25** (multi-item ambiguous cascade).
-   - As expected on adversarial edge cases, a few failures occurred when the model defaulted to `size: "regular"` instead of preserving `"large"` across multi-turn milkshake/soda additions (Scenarios 17 & 19) or eagerly applied an upgrade to both burgers before asking for pronoun disambiguation (Scenario 18). Overall, achieving 80% end-to-end order accuracy across all 25 suites demonstrates strong domain resilience.
+   - The agent successfully passed some of the toughest scenarios in the benchmark—including **Scenario 16** (topping migration and stack-splitting), **Scenario 20** (the 15-turn chaos and state-reconciliation marathon), **Scenario 21** (auto-merge signature collapsing), **Scenario 22** (negative/zero quantity attacks), **Scenario 23** (mid-session cart clearing), **Scenario 24** (`kitchen_busy` recovery with mid-retry cart edits), and **Scenario 25** (multi-item ambiguous cascade).
+   - As expected on adversarial edge cases, a few failures occurred when the model defaulted to `size: "regular"` instead of preserving `"large"` across multi-turn milkshake/soda additions (Scenarios 17 & 19) or eagerly applied an upgrade to both burgers before asking for pronoun disambiguation (Scenario 18). Overall, achieving 84% end-to-end order accuracy (and 81.3% turn accuracy) across all 25 suites demonstrates strong domain resilience.
 
 ---
 

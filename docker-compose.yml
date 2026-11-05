@@ -20,7 +20,7 @@ services:
       - LLAMA_CTX=${LLAMA_CTX:-16384}
       - SPEECH_SERVICE_URL=${SPEECH_SERVICE_URL:-https://speech.pali.autos}
       - APPLICANT_EMAIL=${APPLICANT_EMAIL:-nickpanosrigas@gmail.com}
-      - MCP_SERVER_URL=${MCP_SERVER_URL:-https://webviews-git-moveo-food-nlp-assignment-moveo-ai.vercel.app/api/demo/mcp}
+      - MCP_SERVER_URL=${MCP_SERVER_URL:-https://webviews.moveo.ai/api/demo/mcp}
 
   web:
     build:

@@ -39,7 +39,7 @@ class Settings:
     APPLICANT_EMAIL: str = os.getenv("APPLICANT_EMAIL", "nickpanosrigas@gmail.com").strip()
     MCP_SERVER_URL: str = os.getenv(
         "MCP_SERVER_URL",
-        "https://webviews-git-moveo-food-nlp-assignment-moveo-ai.vercel.app/api/demo/mcp",
+        "https://webviews.moveo.ai/api/demo/mcp",
     ).strip()
 
     # Paths

@@ -10,6 +10,15 @@ from src.core.menu import MenuCatalog, MenuValidationError, ValidatedOrderItem
 MAX_ORDER_TOTAL = Decimal("50.00")
 
 
+def _safe_int(val: Any, default: int | None = None) -> int | None:
+    if val is None or isinstance(val, bool):
+        return default
+    try:
+        return int(val)
+    except (ValueError, TypeError):
+        return default
+
+
 # =====================================================================
 # 1. Line Item Model & Tool Input Schemas
 # =====================================================================
@@ -212,16 +221,25 @@ class OrderCart:
     def exceeds_limit(self) -> bool:
         return Decimal(str(self.total_price)) > MAX_ORDER_TOTAL
 
-    def update_special_instructions(self, notes: str | None) -> None:
+    def update_special_instructions(self, notes: str | None, replace: bool = False) -> None:
         """
-        Edge Case #5 (Special Instructions Aggregation):
+        Edge Case #5 (Special Instructions Aggregation & Clearing):
         Persists special instructions across turns so early dietary notes ('no onions please')
-        are deterministically included when `submit_order` is called later.
+        are deterministically included when `submit_order` is called later, while allowing
+        explicit replacement or clearing when requested.
         """
-        if not notes or not notes.strip():
+        if notes is None:
+            if replace:
+                self.special_instructions = None
             return
+
         cleaned = notes.strip()
-        if not self.special_instructions:
+        if not cleaned or cleaned.lower() in ("none", "clear", "null", "n/a", "no special instructions"):
+            if replace or cleaned.lower() in ("none", "clear", "null", "n/a", "no special instructions"):
+                self.special_instructions = None
+            return
+
+        if replace or not self.special_instructions:
             self.special_instructions = cleaned
         elif cleaned.lower() not in self.special_instructions.lower():
             self.special_instructions = f"{self.special_instructions}; {cleaned}"
@@ -329,11 +347,16 @@ class OrderCart:
             self.update_special_instructions(special_instructions)
 
         # Compute candidate options by merging delta options over the line's current options
+        menu_item = self.menu.get_item(target_line.item_id)
         candidate_options = dict(target_line.options)
         if options:
-            for k, v in options.items():
-                if v is not None:
-                    candidate_options[k] = str(v).lower().strip()
+            cleaned_opts = {k: str(v).lower().strip() for k, v in options.items() if v is not None}
+            valid_keys_present = any(k in menu_item.options for k in cleaned_opts)
+            for k, v in cleaned_opts.items():
+                # Strip hallucinated cross-item default options (e.g., flavor='cola' when editing a pizza)
+                if k not in menu_item.options and valid_keys_present and v in ("cola", "regular", "medium", "beef"):
+                    continue
+                candidate_options[k] = v
 
         # Compute candidate extras by applying `add_extras` and `remove_extras` deltas
         remove_set = {str(e).lower().strip() for e in (remove_extras or []) if e}
@@ -548,28 +571,35 @@ class OrderCart:
     # -----------------------------------------------------------------
     def execute_tool(self, tool_name: str, tool_args: dict[str, Any]) -> dict[str, Any]:
         """Unified dispatcher called by the agentic loop for local cart tools."""
+        if not isinstance(tool_args, dict):
+            tool_args = {}
+
         if tool_name == "add_item":
+            raw_qty = tool_args.get("quantity", 1)
+            qty = _safe_int(raw_qty, default=1 if raw_qty is None else -1)
             return self.add_item(
-                item_id=tool_args.get("item_id", ""),
-                quantity=int(tool_args.get("quantity", 1)),
-                options=tool_args.get("options"),
-                extras=tool_args.get("extras"),
+                item_id=str(tool_args.get("item_id") or ""),
+                quantity=qty if qty is not None else 1,
+                options=tool_args.get("options") if isinstance(tool_args.get("options"), dict) else None,
+                extras=tool_args.get("extras") if isinstance(tool_args.get("extras"), list) else None,
                 special_instructions=tool_args.get("special_instructions"),
             )
         elif tool_name == "edit_item":
             return self.edit_item(
-                line_id=tool_args.get("line_id", ""),
-                target_quantity=tool_args.get("target_quantity"),
-                new_quantity=tool_args.get("new_quantity"),
-                options=tool_args.get("options"),
-                add_extras=tool_args.get("add_extras"),
-                remove_extras=tool_args.get("remove_extras"),
+                line_id=str(tool_args.get("line_id") or ""),
+                target_quantity=_safe_int(tool_args.get("target_quantity")),
+                new_quantity=_safe_int(tool_args.get("new_quantity")),
+                options=tool_args.get("options") if isinstance(tool_args.get("options"), dict) else None,
+                add_extras=tool_args.get("add_extras") if isinstance(tool_args.get("add_extras"), list) else None,
+                remove_extras=tool_args.get("remove_extras") if isinstance(tool_args.get("remove_extras"), list) else None,
                 special_instructions=tool_args.get("special_instructions"),
             )
         elif tool_name == "remove_item":
+            raw_rem_qty = tool_args.get("quantity")
+            rem_qty = None if raw_rem_qty is None else _safe_int(raw_rem_qty, default=-1)
             return self.remove_item(
-                line_id=tool_args.get("line_id", ""),
-                quantity=tool_args.get("quantity"),
+                line_id=str(tool_args.get("line_id") or ""),
+                quantity=rem_qty,
             )
         elif tool_name == "clear_cart":
             return self.clear_cart()

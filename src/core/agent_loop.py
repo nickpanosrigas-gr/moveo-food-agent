@@ -192,7 +192,15 @@ class FoodOrderAgent:
 
                 # 1. Local Cart Tools (Including clear_cart)
                 if fn_name in ("add_item", "edit_item", "remove_item", "clear_cart"):
-                    tool_result = self.cart.execute_tool(fn_name, fn_args)
+                    try:
+                        tool_result = self.cart.execute_tool(fn_name, fn_args)
+                    except Exception as exc:
+                        logger.warning(f"[TOOL ERROR] Unhandled exception in {fn_name}: {exc}")
+                        tool_result = {
+                            "success": False,
+                            "error": f"Invalid arguments for '{fn_name}': {exc}",
+                            "cart": self.cart.get_state_snapshot(),
+                        }
                     is_success = tool_result.get("success", False)
 
                     logger.info(
@@ -226,7 +234,7 @@ class FoodOrderAgent:
 
                 elif fn_name == "set_special_instructions":
                     notes = fn_args.get("special_instructions")
-                    self.cart.update_special_instructions(notes)
+                    self.cart.update_special_instructions(notes, replace=True)
                     tool_result = {
                         "success": True,
                         "special_instructions": self.cart.special_instructions,
@@ -252,7 +260,7 @@ class FoodOrderAgent:
                         logger.warning("[MCP CALL] submit_order skipped (already submitted in this turn)")
                         dup_res = {
                             "status": "ALREADY_SUBMITTED",
-                            "instruction": "The order was already submitted in this turn. State the order_id and estimated_time to the user.",
+                            "instruction": "submit_order was already called in this turn. Respond to the user based on the last_result.",
                             "last_result": exposed_tool_calls[-1]["result"] if exposed_tool_calls else {},
                         }
                         self.history.append(
@@ -345,16 +353,15 @@ class FoodOrderAgent:
                         }
                     )
 
+                    submitted_in_this_turn = True
                     if mcp_result.get("success") is True:
-                        submitted_in_this_turn = True
                         self.cart.mark_submitted(order_id=mcp_result.get("order_id"))
                         self.awaiting_confirmation = False
                         self.can_retry_submission = False
                         last_failed_call = None
                     else:
-                        # Allow model to self-correct arguments in the same turn if schema failed
-                        submitted_in_this_turn = False
-                        self.can_retry_submission = True
+                        self.can_retry_submission = not self.cart.exceeds_limit
+                        self.awaiting_confirmation = False
                         last_failed_call = call_signature
 
                     self.history.append(
