@@ -34,11 +34,19 @@ THINKING_STRIP_REGEX = re.compile(
 
 
 def _sanitize_agent_text(text: str) -> str:
-    """Removes any <think>...</think> blocks, stray </think> tags, and extra whitespace."""
+    """Removes any <think>...</think> blocks, stray </think> tags, extra whitespace, and verbatim stutter loops."""
     if not text:
         return ""
     cleaned = THINKING_STRIP_REGEX.sub("", text)
     cleaned = re.sub(r"\n\s*\n+", "\n", cleaned).strip()
+
+    # Collapse verbatim duplicated full responses (e.g. "Sentence A. Sentence A.")
+    sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', cleaned) if s.strip()]
+    if len(sentences) >= 2 and len(sentences) % 2 == 0:
+        half = len(sentences) // 2
+        if sentences[:half] == sentences[half:]:
+            cleaned = " ".join(sentences[:half])
+
     return cleaned
 
 

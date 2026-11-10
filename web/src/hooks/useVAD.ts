@@ -76,6 +76,7 @@ export function useVAD({
   const analyserNodeRef = useRef<AnalyserNode | null>(null);
   const timeDomainArrayRef = useRef<AnalyserDataArray | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
+  const activationTimeRef = useRef<number>(0);
 
   const callbacksRef = useRef({ onSpeechStart, onSpeechEnd, onVADMisfire });
   useEffect(() => {
@@ -116,23 +117,35 @@ export function useVAD({
       mediaStreamRef.current = stream;
       setupAudioAnalyser(stream);
       setHasPermission(true);
+      activationTimeRef.current = Date.now();
 
       const vad = await MicVAD.new({
         stream,
-        positiveSpeechThreshold: 0.8,
-        negativeSpeechThreshold: 0.65,
-        // 19 frames (~1.82 seconds total silence tolerance) gives 1 extra full second to think mid-sentence
+        positiveSpeechThreshold: 0.6,
+        negativeSpeechThreshold: 0.45,
         redemptionFrames: 19,
         onSpeechStart: () => {
+          if (Date.now() - activationTimeRef.current < 350) {
+            return;
+          }
           setIsSpeaking(true);
           callbacksRef.current.onSpeechStart?.();
         },
         onSpeechEnd: (audio: Float32Array) => {
+          if (Date.now() - activationTimeRef.current < 350) {
+            return;
+          }
+          vadRef.current?.pause();
+          setIsListening(false);
           setIsSpeaking(false);
+
           const wavBlob = encodeWAV(audio, 16000);
           callbacksRef.current.onSpeechEnd?.(wavBlob);
         },
         onVADMisfire: () => {
+          if (Date.now() - activationTimeRef.current < 350) {
+            return;
+          }
           setIsSpeaking(false);
           callbacksRef.current.onVADMisfire?.();
         },
@@ -155,11 +168,11 @@ export function useVAD({
   }, []);
 
   const resume = useCallback(() => {
-    if (enabled && hasPermission && vadRef.current) {
+    if (hasPermission && vadRef.current) {
       vadRef.current.start();
       setIsListening(true);
     }
-  }, [enabled, hasPermission]);
+  }, [hasPermission]);
 
   const getRMSVolume = useCallback((): number => {
     const analyser = analyserNodeRef.current;

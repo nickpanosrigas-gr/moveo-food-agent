@@ -51,7 +51,7 @@ class LlamaClient:
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
-        temperature: float = 0.1,
+        temperature: float = 0.65,
         keep_alive: str | int | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -59,9 +59,14 @@ class LlamaClient:
             "messages": messages,
             "stream": False,
             "temperature": temperature,
-            "max_tokens": 512,
+            "top_p": 0.80,
+            "top_k": 20,
+            "max_tokens": 180,
             "id_slot": 0,
             "cache_prompt": True,
+            "presence_penalty": 1.5,      # 1.2 - 1.5 prevents repetition loops on Qwen3.6-35B
+            "repetition_penalty": 1.0,     # Keep at 1.0 to prevent token degradation
+            "stop": ["<|im_end|>", "<|endoftext|>", "User:", "\n\nUser:"],
             "chat_template_kwargs": {"enable_thinking": False},
         }
         if tools:

@@ -3,6 +3,7 @@ import type { OrbState } from '../types';
 
 interface VoiceOrbProps {
   state: OrbState;
+  isLoading?: boolean;
   rmsVolume?: number;
   getByteTimeDomainData?: () => Uint8Array | null;
   getByteFrequencyData?: () => Uint8Array | null;
@@ -66,6 +67,7 @@ const STATE_CAPTIONS: Record<OrbState, string> = {
 
 export const VoiceOrb: React.FC<VoiceOrbProps> = ({
   state,
+  isLoading = false,
   rmsVolume = 0,
   getByteTimeDomainData,
   getByteFrequencyData,
@@ -74,10 +76,11 @@ export const VoiceOrb: React.FC<VoiceOrbProps> = ({
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
-  const isClickable = state === 'blue' || state === 'green' || state === 'gray';
+  const isClickable = !isLoading && (state === 'blue' || state === 'green' || state === 'gray');
 
   const propsRef = useRef({
     state,
+    isLoading,
     rmsVolume,
     getByteTimeDomainData,
     getByteFrequencyData,
@@ -86,14 +89,20 @@ export const VoiceOrb: React.FC<VoiceOrbProps> = ({
   useEffect(() => {
     propsRef.current = {
       state,
+      isLoading,
       rmsVolume,
       getByteTimeDomainData,
       getByteFrequencyData,
     };
-  }, [state, rmsVolume, getByteTimeDomainData, getByteFrequencyData]);
+  }, [state, isLoading, rmsVolume, getByteTimeDomainData, getByteFrequencyData]);
 
   const activeColors = useMemo(() => STATE_COLORS[state], [state]);
-  const activeCaption = useMemo(() => STATE_CAPTIONS[state], [state]);
+  const activeCaption = useMemo(() => {
+    if (isLoading && state === 'gray') {
+      return 'Initializing AI models... Please wait.';
+    }
+    return STATE_CAPTIONS[state];
+  }, [state, isLoading]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -112,6 +121,7 @@ export const VoiceOrb: React.FC<VoiceOrbProps> = ({
 
       const {
         state: currentState,
+        isLoading: currentIsLoading,
         rmsVolume: rawRMS,
         getByteTimeDomainData: getTimeDomain,
         getByteFrequencyData: getFrequency,
@@ -140,9 +150,14 @@ export const VoiceOrb: React.FC<VoiceOrbProps> = ({
 
       let pulseOffset = 0;
       if (currentState === 'gray') {
-        const cycle = t % 2.5;
-        if (cycle < 0.5) {
-          pulseOffset = Math.sin((cycle / 0.25) * Math.PI * 2) * 4;
+        if (currentIsLoading) {
+          // Visible, smooth breathing enlargement and shrinking (12% base radius swing)
+          pulseOffset = Math.sin(t * 2.2) * (baseRadius * 0.12);
+        } else {
+          const cycle = t % 2.5;
+          if (cycle < 0.5) {
+            pulseOffset = Math.sin((cycle / 0.25) * Math.PI * 2) * 4;
+          }
         }
       } else if (currentState === 'blue') {
         pulseOffset = Math.sin(t * 1.8) * 5;
@@ -198,12 +213,33 @@ export const VoiceOrb: React.FC<VoiceOrbProps> = ({
       ctx.shadowBlur = 0;
 
       if (currentState === 'gray') {
+        // Resting center line that resizes with the breathing orb
         ctx.beginPath();
         ctx.strokeStyle = colors.waveform;
         ctx.lineWidth = 2;
         ctx.moveTo(cx - R, cy);
         ctx.lineTo(cx + R, cy);
         ctx.stroke();
+
+        if (currentIsLoading) {
+          // Orbital arc orbiting outside the orb at a clean, consistent 12px gap
+          const loadingGap = 12;
+          const loadingRadius = R + loadingGap;
+          const spinSpeed = 2.6;
+          const startAngle = (t * spinSpeed) % (Math.PI * 2);
+          const arcLength = Math.PI * 0.65;
+
+          ctx.save();
+          ctx.beginPath();
+          ctx.lineWidth = 2.4;
+          ctx.lineCap = 'round';
+          ctx.strokeStyle = colors.border;
+          ctx.shadowColor = colors.core;
+          ctx.shadowBlur = 8;
+          ctx.arc(cx, cy, loadingRadius, startAngle, startAngle + arcLength);
+          ctx.stroke();
+          ctx.restore();
+        }
       } else if (currentState === 'orange') {
         const dotSpacing = 22;
         ctx.fillStyle = colors.waveform;
@@ -297,12 +333,12 @@ export const VoiceOrb: React.FC<VoiceOrbProps> = ({
         onClick={isClickable ? onOrbClick : undefined}
         role="button"
         tabIndex={isClickable ? 0 : -1}
-        aria-label={`Voice Orb - ${state} state`}
+        aria-label={`Voice Orb - ${isLoading ? 'loading' : state} state`}
         className={`relative flex items-center justify-center transition-transform duration-300 outline-none ${
           isClickable
             ? 'cursor-pointer hover:scale-[1.02] active:scale-[0.98]'
             : 'cursor-default'
-        } ${state === 'gray' ? 'animate-pulse' : ''}`}
+        } ${state === 'gray' && !isLoading ? 'animate-pulse' : ''}`}
       >
         <canvas
           ref={canvasRef}

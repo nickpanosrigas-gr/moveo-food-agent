@@ -47,6 +47,7 @@ export default function App() {
     setOrbState,
     setMicReady,
     isProcessing,
+    isModelsLoaded,
     failureMode,
     setFailureMode,
     messages,
@@ -67,16 +68,14 @@ export default function App() {
   const [liveVolume, setLiveVolume] = useState<number>(0);
   const [isChatInputFocused, setIsChatInputFocused] = useState<boolean>(false);
   const [hasGreeted, setHasGreeted] = useState<boolean>(false);
+  const [isWaitingForModels, setIsWaitingForModels] = useState<boolean>(false);
 
-  // When true, speech emitted while stopping the orb is discarded and never sent to the backend
   const discardRecordingRef = useRef<boolean>(false);
 
   const vad = useVAD({
-    enabled: hasGreeted && (orbState === 'blue' || orbState === 'green') && !isProcessing,
+    enabled: hasGreeted && (orbState === 'blue' || orbState === 'green') && !isProcessing && !isWaitingForModels,
     onSpeechStart: () => {
-      if (orbState === 'blue') {
-        setOrbState('green');
-      }
+      setOrbState('green');
     },
     onSpeechEnd: (audioBlob: Blob) => {
       if (discardRecordingRef.current) {
@@ -96,23 +95,7 @@ export default function App() {
     setMicReady(vad.hasPermission && hasGreeted && orbState !== 'gray');
   }, [vad.hasPermission, hasGreeted, orbState, setMicReady]);
 
-  // Orb click behavior:
-  // - In blue or green: click stops recording, drops audio, and reverts to gray
-  // - In gray: click starts/resumes microphone
-  const handleOrbClick = useCallback(async () => {
-    if (orbState === 'orange' || orbState === 'purple') {
-      return;
-    }
-
-    if (orbState === 'blue' || orbState === 'green') {
-      discardRecordingRef.current = true;
-      vad.pause();
-      setOrbState('gray');
-      setMicReady(false);
-      return;
-    }
-
-    // Gray state: wake up the orb
+  const wakeUpOrb = useCallback(async () => {
     await resumeAudioContext();
 
     if (!hasGreeted) {
@@ -130,7 +113,35 @@ export default function App() {
       setMicReady(true);
       setOrbState('blue');
     }
-  }, [orbState, hasGreeted, vad, playGreeting, setOrbState, setMicReady, resumeAudioContext]);
+  }, [resumeAudioContext, hasGreeted, vad, playGreeting, setMicReady, setOrbState]);
+
+  useEffect(() => {
+    if (isModelsLoaded && isWaitingForModels) {
+      setIsWaitingForModels(false);
+      wakeUpOrb();
+    }
+  }, [isModelsLoaded, isWaitingForModels, wakeUpOrb]);
+
+  const handleOrbClick = useCallback(async () => {
+    if (isWaitingForModels || orbState === 'orange' || orbState === 'purple') {
+      return;
+    }
+
+    if (orbState === 'blue' || orbState === 'green') {
+      discardRecordingRef.current = true;
+      vad.pause();
+      setOrbState('gray');
+      setMicReady(false);
+      return;
+    }
+
+    if (!isModelsLoaded) {
+      setIsWaitingForModels(true);
+      return;
+    }
+
+    await wakeUpOrb();
+  }, [isWaitingForModels, orbState, isModelsLoaded, vad, setOrbState, setMicReady, wakeUpOrb]);
 
   const handleChatFocusChange = useCallback(
     (focused: boolean) => {
@@ -146,9 +157,9 @@ export default function App() {
     let animId: number;
 
     const pollVolume = () => {
-      if (orbState === 'green') {
+      if (effectiveVisualState === 'green') {
         setLiveVolume(vad.getRMSVolume());
-      } else if (orbState === 'purple') {
+      } else if (effectiveVisualState === 'purple') {
         setLiveVolume(audioPlayer.getRMSVolume());
       } else {
         setLiveVolume(0);
@@ -158,10 +169,15 @@ export default function App() {
 
     animId = requestAnimationFrame(pollVolume);
     return () => cancelAnimationFrame(animId);
-  }, [orbState, vad, audioPlayer]);
+  }, [vad, audioPlayer]);
 
+  // Directly derive green visual state from active speech detection
   const effectiveVisualState: OrbState =
-    isChatInputFocused && (orbState === 'blue' || orbState === 'gray') ? 'green' : orbState;
+    isChatInputFocused && (orbState === 'blue' || orbState === 'gray')
+      ? 'green'
+      : vad.isSpeaking && (orbState === 'blue' || orbState === 'green')
+      ? 'green'
+      : orbState;
 
   const activeBg = useMemo(
     () => FULLSCREEN_BACKGROUNDS[effectiveVisualState],
@@ -173,7 +189,6 @@ export default function App() {
       className="relative w-screen h-screen flex flex-col text-slate-100 overflow-hidden select-none transition-colors duration-700"
       style={{ backgroundColor: activeBg.base }}
     >
-      {/* Full-Screen State-Reactive Ambient Background */}
       <div
         className="absolute inset-0 pointer-events-none transition-all duration-700 ease-out"
         style={{
@@ -183,20 +198,18 @@ export default function App() {
         }}
       />
 
-      {/* Micro-grain CSS Texture Overlay */}
       <div className="micro-grain-texture" />
 
-      {/* 3-Column Split Master Stage */}
       <main className="relative z-10 flex-1 min-h-0 flex flex-row overflow-hidden">
-        {/* LEFT HUD: Delivery Ticket */}
         <OrderTicketHUD cartState={cartState} />
 
-        {/* CENTER STAGE: Reset Button (Top), VoiceOrb (Center), DeveloperConsole (Bottom) */}
         <section className="flex-1 min-w-0 h-full flex flex-col items-center justify-between pt-6 px-4 relative">
-          {/* Top Middle: Reset Session Button */}
           <div className="z-20 flex-shrink-0">
             <button
-              onClick={resetSession}
+              onClick={() => {
+                setIsWaitingForModels(false);
+                resetSession();
+              }}
               type="button"
               className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 border border-white/20 text-white font-normal font-sans text-xs transition-colors cursor-pointer"
             >
@@ -205,10 +218,10 @@ export default function App() {
             </button>
           </div>
 
-          {/* Center: 5-State Voice Orb */}
           <div className="flex-1 flex items-center justify-center w-full min-h-0 my-2">
             <VoiceOrb
               state={effectiveVisualState}
+              isLoading={isWaitingForModels}
               rmsVolume={liveVolume}
               getByteTimeDomainData={
                 orbState === 'purple'
@@ -224,7 +237,6 @@ export default function App() {
             />
           </div>
 
-          {/* Bottom Middle: Developer Console */}
           <div className="w-full max-w-3xl flex-shrink-0">
             <DeveloperConsole
               failureMode={failureMode}
@@ -237,7 +249,6 @@ export default function App() {
           </div>
         </section>
 
-        {/* RIGHT PANEL: Chat Bubbles & State-Colored Input Bar */}
         <ChatPanel
           messages={messages}
           streamingAgentMessage={streamingAgentMessage}

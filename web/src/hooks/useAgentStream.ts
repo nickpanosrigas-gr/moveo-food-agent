@@ -24,6 +24,7 @@ export interface UseAgentStreamReturn {
   setOrbState: (state: OrbState) => void;
   setMicReady: (ready: boolean) => void;
   isProcessing: boolean;
+  isModelsLoaded: boolean;
   failureMode: FailureMode;
   setFailureMode: (mode: FailureMode) => void;
 
@@ -87,6 +88,7 @@ export function useAgentStream({
 
   const [orbState, setOrbState] = useState<OrbState>('gray');
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
+  const [isModelsLoaded, setIsModelsLoaded] = useState<boolean>(false);
   const [failureMode, setFailureMode] = useState<FailureMode>(initialFailureMode);
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -98,6 +100,7 @@ export function useAgentStream({
   const abortControllerRef = useRef<AbortController | null>(null);
   const activeAgentMessageRef = useRef<string>('');
   const isMicReadyRef = useRef<boolean>(false);
+  const isRequestInFlightRef = useRef<boolean>(false);
 
   const setMicReady = useCallback((ready: boolean) => {
     isMicReadyRef.current = ready;
@@ -130,20 +133,24 @@ export function useAgentStream({
       activeAgentMessageRef.current = '';
       setStreamingAgentMessage('');
 
+      isRequestInFlightRef.current = false;
       setIsProcessing(false);
       setOrbState(getIdleState());
     },
     onError: (err) => {
       console.error('[AudioPlayer Error]', err);
+      isRequestInFlightRef.current = false;
+      setIsProcessing(false);
+      setOrbState(getIdleState());
     },
   });
 
   const playGreeting = useCallback(async () => {
     setIsProcessing(true);
+    isRequestInFlightRef.current = true;
     activeAgentMessageRef.current = '';
     setStreamingAgentMessage('');
     await audioPlayer.resumeAudioContext();
-    // Correct URL pointing into /web/public/audio/
     const greetingAudioUrl = speechProvider === 'mistral' ? '/audio/mistral.wav' : '/audio/speech.wav';
     await audioPlayer.enqueueLocalGreeting(greetingAudioUrl, GREETING_TEXT);
   }, [audioPlayer, speechProvider]);
@@ -175,20 +182,24 @@ export function useAgentStream({
 
             switch (event.type) {
               case 'transcription': {
-                const userMsg: ChatMessage = {
-                  id: `user_${Date.now()}`,
-                  role: 'user',
-                  text: event.text,
-                  timestamp: new Date().toISOString(),
-                };
-                setMessages((prev) => [...prev, userMsg]);
+                if (event.text) {
+                  const userMsg: ChatMessage = {
+                    id: `user_${Date.now()}`,
+                    role: 'user',
+                    text: event.text,
+                    timestamp: new Date().toISOString(),
+                  };
+                  setMessages((prev) => [...prev, userMsg]);
+                }
                 setOrbState('orange');
                 break;
               }
 
               case 'turn_metadata': {
                 setCartState(event.cart_state);
-                setTurnLogs((prev) => [...prev, event.turn_log]);
+                if (event.turn_log) {
+                  setTurnLogs((prev) => [...prev, event.turn_log]);
+                }
                 if (event.mcp_payload) {
                   setLastMcpPayload(event.mcp_payload);
                 }
@@ -213,6 +224,7 @@ export function useAgentStream({
       } catch (err: unknown) {
         if ((err as Error)?.name !== 'AbortError') {
           console.error('[Stream Parsing Error]', err);
+          isRequestInFlightRef.current = false;
           setIsProcessing(false);
           setOrbState(getIdleState());
         }
@@ -226,8 +238,9 @@ export function useAgentStream({
   const sendTextMessage = useCallback(
     async (messageText: string) => {
       const cleanText = messageText.trim();
-      if (!cleanText || isProcessing) return;
+      if (!cleanText || isRequestInFlightRef.current || isProcessing) return;
 
+      isRequestInFlightRef.current = true;
       setIsProcessing(true);
       setOrbState('orange');
       activeAgentMessageRef.current = '';
@@ -263,6 +276,7 @@ export function useAgentStream({
         await processNDJSONStream(response);
       } catch (err) {
         console.error('[Text Chat Error]', err);
+        isRequestInFlightRef.current = false;
         setIsProcessing(false);
         setOrbState(getIdleState());
       }
@@ -272,8 +286,9 @@ export function useAgentStream({
 
   const sendVoiceMessage = useCallback(
     async (audioBlob: Blob) => {
-      if (isProcessing) return;
+      if (isRequestInFlightRef.current || isProcessing) return;
 
+      isRequestInFlightRef.current = true;
       setIsProcessing(true);
       setOrbState('orange');
       activeAgentMessageRef.current = '';
@@ -301,6 +316,7 @@ export function useAgentStream({
         await processNDJSONStream(response);
       } catch (err) {
         console.error('[Voice Chat Error]', err);
+        isRequestInFlightRef.current = false;
         setIsProcessing(false);
         setOrbState(getIdleState());
       }
@@ -309,6 +325,7 @@ export function useAgentStream({
   );
 
   const resetSession = useCallback(async () => {
+    isRequestInFlightRef.current = false;
     audioPlayer.stopPlayback();
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
@@ -357,6 +374,9 @@ export function useAgentStream({
     })
       .then((res) => res.json())
       .then((data) => {
+        if (data.status === 'ready') {
+          setIsModelsLoaded(true);
+        }
         if (data.cart_state) setCartState(data.cart_state);
         if (data.logs) setTurnLogs(data.logs);
         if (data.llm_provider) {
@@ -370,7 +390,10 @@ export function useAgentStream({
           );
         }
       })
-      .catch((err) => console.error('[Session Warmup Error]', err));
+      .catch((err) => {
+        console.error('[Session Warmup Error]', err);
+        setIsModelsLoaded(true);
+      });
 
     const handleBeforeUnload = () => {
       const payload = JSON.stringify({ session_id: sessionId });
@@ -392,6 +415,7 @@ export function useAgentStream({
     setOrbState,
     setMicReady,
     isProcessing,
+    isModelsLoaded,
     failureMode,
     setFailureMode,
     messages,

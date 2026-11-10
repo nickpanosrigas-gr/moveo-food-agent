@@ -43,7 +43,6 @@ def is_empty_or_silence(text: str) -> bool:
     if not text:
         return True
     cleaned = text.strip()
-    # Strip everything except letters and numbers
     alphanumeric = re.sub(r"[^\w]", "", cleaned)
     if not alphanumeric:
         return True
@@ -54,11 +53,17 @@ class SessionManager:
         self.speech = speech_client
         self.sessions: dict[str, FoodOrderAgent] = {}
         self.last_active: dict[str, float] = {}
+        self.session_locks: dict[str, asyncio.Lock] = {}
         self.models_loaded: bool = not any_service_uses_vram()
         self._warmup_in_progress = False
         self._warmup_task: asyncio.Task | None = None
         self._watchdog_task: asyncio.Task | None = None
         self._lock = asyncio.Lock()
+
+    def get_session_lock(self, session_id: str) -> asyncio.Lock:
+        if session_id not in self.session_locks:
+            self.session_locks[session_id] = asyncio.Lock()
+        return self.session_locks[session_id]
 
     def start_watchdog(self) -> None:
         if not any_service_uses_vram():
@@ -134,6 +139,7 @@ class SessionManager:
         async with self._lock:
             closing_agent = self.sessions.pop(session_id, None)
             self.last_active.pop(session_id, None)
+            self.session_locks.pop(session_id, None)
             remaining = len(self.sessions)
 
         if not any_service_uses_vram():
@@ -163,6 +169,7 @@ class SessionManager:
                 log_path=f"logs/session_{session_id}.jsonl"
             )
             self.last_active[session_id] = time.monotonic()
+            self.session_locks.pop(session_id, None)
             agent = self.sessions[session_id]
         logger.info(f"[SESSION] Reset cart and conversation for '{session_id}'")
         return {
@@ -188,6 +195,7 @@ class SessionManager:
                     logger.info(f"[SESSION] Expired idle session '{sid}' (15m)")
                     self.last_active.pop(sid, None)
                     self.sessions.pop(sid, None)
+                    self.session_locks.pop(sid, None)
 
                 if not self.last_active and self.models_loaded:
                     self.models_loaded = False
@@ -385,6 +393,7 @@ async def chat_text_endpoint(req: TextChatRequest) -> StreamingResponse:
     if getattr(session_manager, "_warmup_task", None) and not session_manager._warmup_task.done():
         await session_manager._warmup_task
     await session_manager.touch_session(req.session_id)
+    session_lock = session_manager.get_session_lock(req.session_id)
 
     if is_empty_or_silence(req.message):
         return StreamingResponse(
@@ -393,8 +402,15 @@ async def chat_text_endpoint(req: TextChatRequest) -> StreamingResponse:
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
+    async def _locked_text_generator() -> AsyncIterator[bytes]:
+        async with session_lock:
+            async for event_bytes in _stream_agent_turn(
+                agent=agent, user_text=req.message, force_failure=req.force_failure
+            ):
+                yield event_bytes
+
     return StreamingResponse(
-        _stream_agent_turn(agent=agent, user_text=req.message, force_failure=req.force_failure),
+        _locked_text_generator(),
         media_type="application/x-ndjson",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
@@ -412,43 +428,45 @@ async def chat_voice_endpoint(
     await session_manager.touch_session(session_id)
     audio_bytes = await file.read()
     filename = file.filename or f"recording_{uuid.uuid4().hex[:6]}.wav"
+    session_lock = session_manager.get_session_lock(session_id)
 
     async def _voice_pipeline_generator() -> AsyncIterator[bytes]:
-        if not audio_bytes:
-            yield _ndjson_line({"type": "error", "error": "Empty audio recording received."})
-            return
+        async with session_lock:
+            if not audio_bytes:
+                yield _ndjson_line({"type": "error", "error": "Empty audio recording received."})
+                return
 
-        try:
-            transcribed_text = await speech_client.transcribe_chunks(
-                audio_chunks=audio_bytes,
-                filename=filename,
-                keep_alive=INACTIVITY_TIMEOUT_SECONDS,
-            )
-            logger.info(f'[STT] Transcribed user voice: "{transcribed_text}"')
-        except Exception as stt_exc:
-            logger.error(f"[STT] Failed to transcribe: {stt_exc}", exc_info=True)
-            yield _ndjson_line({"type": "error", "error": f"Speech-to-text failed: {stt_exc}"})
-            return
+            try:
+                transcribed_text = await speech_client.transcribe_chunks(
+                    audio_chunks=audio_bytes,
+                    filename=filename,
+                    keep_alive=INACTIVITY_TIMEOUT_SECONDS,
+                )
+                logger.info(f'[STT] Transcribed user voice: "{transcribed_text}"')
+            except Exception as stt_exc:
+                logger.error(f"[STT] Failed to transcribe: {stt_exc}", exc_info=True)
+                yield _ndjson_line({"type": "error", "error": f"Speech-to-text failed: {stt_exc}"})
+                return
 
-        # Short-circuit false-positive VAD triggers and empty speech
-        if is_empty_or_silence(transcribed_text):
-            logger.info("[STT] Silence or artifact detected. Emitting fallback clarification.")
-            yield _ndjson_line({"type": "transcription", "text": ""})
-            async for event_bytes in _stream_fallback_turn(
+            # Short-circuit false-positive VAD triggers and empty speech
+            if is_empty_or_silence(transcribed_text):
+                logger.info("[STT] Silence or artifact detected. Emitting fallback clarification.")
+                yield _ndjson_line({"type": "transcription", "text": ""})
+                async for event_bytes in _stream_fallback_turn(
+                    agent=agent,
+                    fallback_message="Sorry, I couldn't hear you.",
+                ):
+                    yield event_bytes
+                return
+
+            yield _ndjson_line({"type": "transcription", "text": transcribed_text})
+
+            async for event_bytes in _stream_agent_turn(
                 agent=agent,
-                fallback_message="Sorry, I couldn't hear you.",
+                user_text=transcribed_text,
+                force_failure=force_failure,
             ):
                 yield event_bytes
-            return
-
-        yield _ndjson_line({"type": "transcription", "text": transcribed_text})
-
-        async for event_bytes in _stream_agent_turn(
-            agent=agent,
-            user_text=transcribed_text,
-            force_failure=force_failure,
-        ):
-            yield event_bytes
 
     return StreamingResponse(
         _voice_pipeline_generator(),
