@@ -82,6 +82,22 @@ class MistralClient:
 
         choice = data.get("choices", [{}])[0]
         msg = choice.get("message", {})
+
+        # --- SINGLE-LINE RAW LLM RESPONSE LOG ---
+        raw_content = (msg.get("content") or msg.get("reasoning_content") or "").replace("\n", " ").strip()
+        raw_tool_calls = msg.get("tool_calls")
+
+        if raw_tool_calls:
+            calls_str = ", ".join(
+                f"{tc.get('function', {}).get('name', '')}({tc.get('function', {}).get('arguments', '')})"
+                for tc in raw_tool_calls
+            )
+            raw_log = f"tool_calls=[{calls_str}]" + (f' | content="{raw_content}"' if raw_content else "")
+        else:
+            raw_log = f'content="{raw_content}"'
+
+        logger.info(f"[Mistral API] Raw LLM Response: {raw_log}")
+
         return self._normalize_message(msg)
 
     def warmup_kv_cache_sync(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:

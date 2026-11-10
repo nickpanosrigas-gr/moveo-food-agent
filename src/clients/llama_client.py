@@ -64,8 +64,8 @@ class LlamaClient:
             "max_tokens": 180,
             "id_slot": 0,
             "cache_prompt": True,
-            "presence_penalty": 1.5,      # 1.2 - 1.5 prevents repetition loops on Qwen3.6-35B
-            "repetition_penalty": 1.0,     # Keep at 1.0 to prevent token degradation
+            "presence_penalty": 1.2,
+            "repetition_penalty": 1.0,
             "stop": ["<|im_end|>", "<|endoftext|>", "User:", "\n\nUser:"],
             "chat_template_kwargs": {"enable_thinking": False},
         }
@@ -84,6 +84,22 @@ class LlamaClient:
 
         choice = data.get("choices", [{}])[0]
         msg = choice.get("message", {})
+
+        # --- SINGLE-LINE RAW LLM RESPONSE LOG ---
+        raw_content = (msg.get("content") or msg.get("reasoning_content") or "").replace("\n", " ").strip()
+        raw_tool_calls = msg.get("tool_calls")
+
+        if raw_tool_calls:
+            calls_str = ", ".join(
+                f"{tc.get('function', {}).get('name', '')}({tc.get('function', {}).get('arguments', '')})"
+                for tc in raw_tool_calls
+            )
+            raw_log = f"tool_calls=[{calls_str}]" + (f' | content="{raw_content}"' if raw_content else "")
+        else:
+            raw_log = f'content="{raw_content}"'
+
+        logger.info(f"[llama-server] Raw LLM Response: {raw_log}")
+
         return self._normalize_message(msg)
 
     def warmup_kv_cache_sync(

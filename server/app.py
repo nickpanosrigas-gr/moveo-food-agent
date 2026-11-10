@@ -389,6 +389,8 @@ async def get_config_endpoint() -> dict[str, str]:
 
 @app.post("/api/chat/text")
 async def chat_text_endpoint(req: TextChatRequest) -> StreamingResponse:
+    logger.info(f'[User Text] Session "{req.session_id}": "{req.message}"')
+
     agent = await session_manager.get_or_create_agent(req.session_id)
     if getattr(session_manager, "_warmup_task", None) and not session_manager._warmup_task.done():
         await session_manager._warmup_task

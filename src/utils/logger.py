@@ -14,14 +14,29 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+class UvicornLoggerNameFilter(logging.Filter):
+    """
+    Rewrites the logger name from 'uvicorn.error' to 'uvicorn.server' for non-error logs.
+    Prevents standard INFO lifecycle logs from showing '[uvicorn.error]'.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.name == "uvicorn.error":
+            record.name = "uvicorn.server" if record.levelno < logging.ERROR else "uvicorn.error"
+        return True
+
+
 def setup_logging(level: int = logging.INFO) -> None:
     """
     Configures a single, consistent logging format across the entire application
-    (both CLI and FastAPI/Uvicorn), while silencing noisy network libraries.
+    (both CLI and FastAPI/Uvicorn), while silencing noisy network libraries and
+    renaming misleading uvicorn.error logs.
     """
     log_format = "%(asctime)s [%(levelname)s] [%(name)s]: %(message)s"
     date_format = "%Y-%m-%d %H:%M:%S"
     formatter = logging.Formatter(fmt=log_format, datefmt=date_format)
+
+    filter_instance = UvicornLoggerNameFilter()
 
     # 1. Configure root logger
     root_logger = logging.getLogger()
@@ -33,17 +48,19 @@ def setup_logging(level: int = logging.INFO) -> None:
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setFormatter(formatter)
     console_handler.setLevel(level)
+    console_handler.addFilter(filter_instance)
     root_logger.addHandler(console_handler)
 
     # 2. Silence verbose HTTP library logs
     for noisy in ("httpx", "httpcore", "urllib3"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
-    # 3. Align Uvicorn loggers to use the exact same formatter
+    # 3. Align Uvicorn loggers to use the exact same formatter and filter
     for uvicorn_name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
         u_log = logging.getLogger(uvicorn_name)
         u_log.handlers.clear()
         u_log.addHandler(console_handler)
+        u_log.addFilter(filter_instance)
         u_log.propagate = False
 
 
